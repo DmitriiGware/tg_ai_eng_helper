@@ -249,9 +249,9 @@ async def main():
             "Советую сначала нажать или ввести команду /help.\n\n"
             "You can choose a mode below and choose a type of learning.\n"
             "Вы можете выбрать режим и выбрать тип обучения.\n\n"
-            f"🎯 Current level: {"Begginer"}\n"
-            f"If you don't know your level, try {"Begginer"} first.\n"
-            f"Если вы не знаете ваш уровень, начните с {"Begginer"}.",
+            "🎯 Current level: ""Beginner""\n"
+            "If you don't know your level, try ""Beginner"" first.\n"
+            "Если вы не знаете ваш уровень, начните с ""Beginner"".",
             reply_markup=main_menu(call.from_user.id)
         )
 
