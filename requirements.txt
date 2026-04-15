@@ -1,8 +1,8 @@
 aiogram==3.21.0
 python-dotenv
-<<<<<<< HEAD
-groq
-=======
+
+groq==5a6f975c38211aa69635f507fdeb9ce05fb04678
+
 groq
 pydantic==2.7.4
->>>>>>> 5a6f975c38211aa69635f507fdeb9ce05fb04678
+#>>>>>>> 5a6f975c38211aa69635f507fdeb9ce05fb04678

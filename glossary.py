@@ -1,54 +1,76 @@
-GLOSSARY = [
-    # 🔹 Основные разделы
-    {"word": "Learning", "ru": "Обучение", "desc": "Раздел для изучения тем"},
-    {"word": "Practice", "ru": "Практика", "desc": "Раздел для тренировки навыков"},
-    {"word": "Advanced", "ru": "Продвинутый", "desc": "Дополнительные функции (премиум)"},
-    {"word": "Settings", "ru": "Настройки", "desc": "Изменение параметров бота"},
-    {"word": "Glossary", "ru": "Глоссарий", "desc": "Список слов для навигации"},
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-    # 🔹 Learning
-    {"word": "Explain", "ru": "Объяснить", "desc": "Понять тему с примерами"},
-    {"word": "Summary", "ru": "Кратко", "desc": "Короткий конспект темы"},
+def glossary_menu():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Learning", callback_data="glossary_learning")],
+        [InlineKeyboardButton(text="🧠 Practice", callback_data="glossary_practice")],
+        [InlineKeyboardButton(text="🚀 Premium", callback_data="glossary_premium")],
+        [InlineKeyboardButton(text="⚙️ Navigation", callback_data="glossary_nav")],
+        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_main")]
+    ])
 
-    # 🔹 Practice
-    {"word": "Quiz", "ru": "Тест", "desc": "Ответы на вопросы по теме"},
-    {"word": "Practice task", "ru": "Практика", "desc": "Задания для тренировки"},
 
-    # 🔹 Advanced
-    {"word": "Chat", "ru": "Чат", "desc": "Общение на английском"},
-    {"word": "Fix sentence", "ru": "Исправить предложение", "desc": "Проверка ошибок"},
-    {"word": "Voice", "ru": "Голос", "desc": "Голосовое взаимодействие"},
+def glossary_text(category: str):
+    data = {
+        "learning": (
+            "📚 Learning\n\n"
+            
+            "📚 Explain\n\n"
+            "Перевод: объяснить\n"
+            "Ты вводишь тему, бот объясняет её\n"
+            "Пример: Present Simple\n\n"
 
-    # 🔹 Навигация
-    {"word": "Back", "ru": "Назад", "desc": "Вернуться в меню"},
-    {"word": "Menu", "ru": "Меню", "desc": "Главный экран"},
-    {"word": "Cancel", "ru": "Отмена", "desc": "Прервать действие"},
-    {"word": "Help", "ru": "Помощь", "desc": "Инструкция по боту"},
+            "📝 Summary\n\n"
+            "Перевод: кратко\n"
+            "Бот делает короткий конспект\n"
+            "Пример: Past Simple"
+        ),
 
-    # 🔹 Уровни
-    {"word": "Level", "ru": "Уровень", "desc": "Сложность обучения"},
-    {"word": "Beginner", "ru": "Начинающий", "desc": "Базовый уровень"},
-    {"word": "Intermediate", "ru": "Средний", "desc": "Средний уровень"},
-    {"word": "Advanced level", "ru": "Продвинутый уровень", "desc": "Сложный уровень"},
+        "practice": (
+            "🧠 Practice\n\n"
 
-    # 🔹 Действия
-    {"word": "Choose", "ru": "Выбери", "desc": "Сделать выбор"},
-    {"word": "Type", "ru": "Ввести", "desc": "Написать текст"},
-    {"word": "Topic", "ru": "Тема", "desc": "О чем ты хочешь узнать"},
-    {"word": "Answer", "ru": "Ответ", "desc": "Результат от бота"},
+            "🧩 Quiz\n\n"
+            "Перевод: тест\n"
+            "Бот задаёт вопросы по теме\n\n"
 
-    # 🔹 Системные
-    {"word": "Thinking", "ru": "Думаю", "desc": "Бот обрабатывает запрос"},
-    {"word": "Error", "ru": "Ошибка", "desc": "Что-то пошло не так"},
-    {"word": "Premium", "ru": "Премиум", "desc": "Платные функции"},
-]
+            "🧠 Practice\n\n"
+            "Перевод: практика\n"
+            "Бот дает несколько заданий\n"
+            "Пример: перевести предложение"
+        ),
 
-def format_glossary():
-    text = "📚 Glossary | Глоссарий\n\n"
+        "premium": (
+            "🚀 Premium \n\n"
 
-    for item in GLOSSARY:
-        text += f"• {item['word']} — {item['ru']}\n"
-        text += f"  {item['desc']}\n\n"
+            "💬 Chat\n\n"
+            "Перевод: чат\n"
+            "Ты общаешься на английском\n\n"
 
-    text += "💡 Tip: Use /start to return to menu"
-    return text
+            "✍️ Road map\n\n"
+            "Перевод: Путевая карта\n"
+            "Бот составляет карту изучения языка по вашему уровню языка\n\n"
+            
+
+            "🎤 Voice\n\n"
+            "Перевод: голос\n"
+            "Общение с ботом голосовыми сообщениями"
+        ),
+
+        "nav": (
+            "⚙️ Navigation\n\n"
+
+            "⬅️ Back — назад\n"
+            "Вернуться в меню\n\n"
+
+            "❌ Cancel — отмена\n"
+            "Остановить действие\n\n"
+
+            "❓ Help — помощь\n"
+            "Показать инструкцию\n\n"
+
+            "🎯 Level — уровень\n"
+            "Выбрать сложность"
+        )
+    }
+
+    return data.get(category, "Glossary")

@@ -19,8 +19,8 @@ MODES = {
         "title": "💬 Chat",
         "premium": True
     },
-    "correction": {
-        "title": "✍️ Fix my sentence",
+    "roadmap": {
+        "title": "✍️ Road map",
         "premium": True
     },
     "voice": {
