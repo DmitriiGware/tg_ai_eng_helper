@@ -18,14 +18,14 @@ from modes import MODES
 from motivation import get_phrase
 from glossary import glossary_menu, glossary_text
 from datetime import datetime
+from database.db import SessionLocal
+from database.models import User
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
-
-USER_LEVEL = {}  # user_id -> "Beginner" | "Intermediate" | "Advanced"
 
 
 #ПРОВЕРКА ПРЕМКИ
@@ -36,7 +36,15 @@ def is_premium(user_id: int) -> bool:
 #УРОВЕНЬ ПОЛЬЗОВАТЕЛЯ
 
 def get_level(user_id: int) -> str:
-    return USER_LEVEL.get(user_id, "Beginner")
+    db = SessionLocal()
+    user = db.query(User).filter(User.telegram_id == user_id).first()
+    db.close()
+
+    if user and user.level:
+        return user.level
+
+    return "Beginner"
+
 
 #МЕНЮ
 
@@ -173,11 +181,6 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
 
-    @dp.message(CommandStart())
-    async def start(message: Message, state: FSMContext):
-        await state.set_state(Registration.name)
-        await message.answer("Hello! What's your name?\nПривет! Как тебя зовут? 👋")
-
     @dp.message(Registration.name)
     async def reg_name(message: Message, state: FSMContext):
         name = (message.text or "").strip()
@@ -238,7 +241,20 @@ async def main():
     async def reg_freq(call: CallbackQuery, state: FSMContext):
         freq = call.data.replace("freq_", "")
         data = await state.get_data()
-        # 👉 тут потом сохраним в БД
+
+        #BD
+        db = SessionLocal()
+
+        user = User(
+            telegram_id=call.from_user.id,
+            name=data["name"],
+            birthdate=data["birthdate"],
+            frequency=freq
+        )
+
+        db.add(user)
+        db.commit()
+        db.close()
 
         await state.clear()
 
@@ -432,7 +448,14 @@ async def main():
         elif data.startswith("set_level:"):
             level = data.split(":", 1)[1]
             user_id = call.from_user.id
-            USER_LEVEL[user_id] = level
+            db = SessionLocal()
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+
+            if user:
+                user.level = level
+                db.commit()
+
+            db.close()
             await call.message.edit_text(
                 f"✅ Level set: {level}",
                 reply_markup=main_menu(user_id)
