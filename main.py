@@ -20,6 +20,8 @@ from glossary import glossary_menu, glossary_text
 from datetime import datetime
 from database.db import SessionLocal
 from database.models import User
+from database.db import engine
+from database.models import Base
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -174,6 +176,8 @@ async def notify_bot_started(bot: Bot) -> None:
 
 async def main():
     logging.basicConfig(level=logging.INFO)
+
+    Base.metadata.create_all(bind=engine)
 
     if not BOT_TOKEN:
         raise RuntimeError(f"BOT_TOKEN is missing. Env file: {ENV_PATH}")
