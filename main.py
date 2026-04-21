@@ -206,7 +206,7 @@ async def main():
 
         await state.update_data(name=name)
         await state.set_state(Registration.birthdate)
-        await message.answer("Enter your birth day:\nВведите дату рождения: (01.01.2000)")
+        await message.answer("Enter your date of birth:\nВведите дату рождения: (01.01.2000)")
 
     @dp.message(Registration.birthdate)
     async def reg_birth(message: Message, state: FSMContext):
@@ -252,7 +252,7 @@ async def main():
         user = User(
             telegram_id=call.from_user.id,
             name=data["name"],
-            birthdate=data["birthdate"],
+            birthday=data["birthdate"],
             frequency=freq
         )
 
