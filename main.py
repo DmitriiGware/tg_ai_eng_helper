@@ -314,7 +314,18 @@ async def main():
 
     @dp.message(CommandStart())
     async def start(message: Message, state: FSMContext):
-        await show_main_menu(message, state)
+        db = SessionLocal()
+
+        user = db.query(User).filter(User.telegram_id == message.from_user.id).first()
+        db.close()
+
+        if user:
+            await show_main_menu(message, state)
+        else:
+            await state.set_state(Registration.name)
+            await message.answer(
+                "Hello! What's your name?\nПривет! Как тебя зовут? 👋"
+            )
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message):
