@@ -9,4 +9,4 @@ class User(Base):
     name = Column(String)
     birthday = Column(String)
     frequency = Column(String)
-    level = Column(String, default="Beginner")
+    level = Column(String, default="A1")

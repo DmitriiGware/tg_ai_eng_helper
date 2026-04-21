@@ -2,26 +2,25 @@ import asyncio
 import logging
 import os
 import re
-from dotenv import load_dotenv
+from datetime import datetime
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from dotenv import load_dotenv
 
-from prompts import make_user_prompt
 from ai_client import ask_ai
+from database.db import SessionLocal, engine
+from database.models import Base, User
+from glossary import glossary_menu, glossary_text
+from level_tests import get_level_test
 from modes import MODES
 from motivation import get_phrase
-from glossary import glossary_menu, glossary_text
-from datetime import datetime
-from database.db import SessionLocal
-from database.models import User
-from database.db import engine
-from database.models import Base
+from prompts import make_user_prompt
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -29,13 +28,38 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
 
+DEFAULT_LEVEL = "A1"
+LEVELS = [
+    ("A1", "A1 Beginner lvl 1"),
+    ("A2", "A2 Beginner lvl 2"),
+    ("B1", "B1 Intermediate lvl 1"),
+    ("B2", "B2 Intermediate lvl 2"),
+    ("C1", "C1 Advanced lvl 1"),
+    ("C2", "C2 Advanced lvl 2"),
+]
+LEVEL_LABELS = dict(LEVELS)
+LEGACY_LEVELS = {
+    "Beginner": "A1",
+    "Intermediate": "B1",
+    "Advanced": "C1",
+}
 
-#ПРОВЕРКА ПРЕМКИ
+
+def normalize_level(level: str | None) -> str:
+    if not level:
+        return DEFAULT_LEVEL
+
+    level = level.strip()
+    return LEGACY_LEVELS.get(level, level if level in LEVEL_LABELS else DEFAULT_LEVEL)
+
+
+def level_label(level: str | None) -> str:
+    return LEVEL_LABELS[normalize_level(level)]
+
 
 def is_premium(user_id: int) -> bool:
     return False
 
-#УРОВЕНЬ ПОЛЬЗОВАТЕЛЯ
 
 def get_level(user_id: int) -> str:
     db = SessionLocal()
@@ -43,12 +67,10 @@ def get_level(user_id: int) -> str:
     db.close()
 
     if user and user.level:
-        return user.level
+        return normalize_level(user.level)
 
-    return "Beginner"
+    return DEFAULT_LEVEL
 
-
-#МЕНЮ
 
 def main_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -60,28 +82,25 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="🚀 Premium", callback_data="menu_advanced"),
             InlineKeyboardButton(text="⚙️ Settings", callback_data="menu_settings"),
         ],
-        [InlineKeyboardButton(text="📚 Glossary | Глоссарий для новичков", callback_data="glossary")]
+        [InlineKeyboardButton(text="📚 Glossary | Глоссарий для новичков", callback_data="glossary")],
     ])
 
-#МЕНЮ ОБУЧЕНИЯ
 
 def learning_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📚 Explain", callback_data="mode_explain")],
         [InlineKeyboardButton(text="📝 Summary", callback_data="mode_summary")],
-        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")]
+        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")],
     ])
 
-#МЕНЮ ПРАКТИКИ
 
 def practice_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧩 Quiz", callback_data="mode_quiz")],
         [InlineKeyboardButton(text="🧠 Practice", callback_data="mode_practice")],
-        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")]
+        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")],
     ])
 
-#РАСШИРЕННЫЙ ФУНКЦИОНАЛ
 
 def advanced_menu(user_id: int):
     def lock(text, key):
@@ -97,59 +116,78 @@ def advanced_menu(user_id: int):
         [
             InlineKeyboardButton(text=lock("🎤 Voice", "voice"), callback_data="mode_voice"),
             InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main"),
-        ]
+        ],
     ])
 
-#МЕНЮ НАСТРОЕК
 
 def settings_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎯 Change level", callback_data="change_level")],
         [InlineKeyboardButton(text="❓ Help", callback_data="help")],
-        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")]
+        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")],
     ])
 
-#КНОПКА ОТМЕНЫ
 
 def cancel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Cancel | Отмена", callback_data="cancel")]
+        [InlineKeyboardButton(text="❌ Cancel | Отмена", callback_data="cancel")],
     ])
-
-#МЕНЮ ВЫБОРА
-
-def level_kb(current: str):
-    rows = [
-        [InlineKeyboardButton(text=("✅ Beginner | Начинающий" if current == "Beginner" else "Beginner"), callback_data="set_level:Beginner")],
-        [InlineKeyboardButton(text=("✅ Intermediate | Промежуточный" if current == "Intermediate" else "Intermediate"), callback_data="set_level:Intermediate")],
-        [InlineKeyboardButton(text=("✅ Advanced | Продвинутый" if current == "Advanced" else "Advanced"), callback_data="set_level:Advanced")],
-        [InlineKeyboardButton(text="⬅️ to Menu | Назад в меню", callback_data="back_menu")],
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def delete_later(msg, delay=10):
     await asyncio.sleep(delay)
     try:
         await msg.delete()
-    except:
+    except Exception:
         pass
 
-#БЛОК ПОСЛЕ ОБЪЯСНЕНИЙ
 
 def after_explain_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🧠 Practice", callback_data="practice")],
-        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_menu")]
+        [InlineKeyboardButton(text="⬅️ to Menu", callback_data="back_main")],
     ])
+
+
+def level_kb(current: str):
+    current = normalize_level(current)
+    rows = []
+    for code, label in LEVELS:
+        prefix = "✅ " if current == code else ""
+        rows.append([InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"set_level:{code}")])
+
+    rows.append([InlineKeyboardButton(text="⬅️ to Menu | Назад в меню", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def level_change_confirm_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Да", callback_data="level_test_yes")],
+        [InlineKeyboardButton(text="Отмена", callback_data="level_test_cancel")],
+    ])
+
+
+def level_question_kb(question: dict):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=option, callback_data=f"level_answer:{index}")]
+        for index, option in enumerate(question["options"])
+    ])
+
 
 class Registration(StatesGroup):
     name = State()
     birthdate = State()
     frequency = State()
 
+
 class StudyFlow(StatesGroup):
     waiting_topic = State()
+
+
+class LevelChangeFlow(StatesGroup):
+    confirming = State()
+    testing = State()
+
 
 async def notify_bot_started(bot: Bot) -> None:
     if not ADMIN_TELEGRAM_ID:
@@ -164,19 +202,14 @@ async def notify_bot_started(bot: Bot) -> None:
 
     try:
         me = await bot.get_me()
-        msg = await bot.send_message(
-            admin_id,
-            f"Bot @{me.username or me.first_name} started successfully."
-        )
-
+        msg = await bot.send_message(admin_id, f"Bot @{me.username or me.first_name} started successfully.")
         asyncio.create_task(delete_later(msg, 5))
-
     except Exception as exc:
         logging.exception("Failed to send startup notification: %s", exc)
 
+
 async def main():
     logging.basicConfig(level=logging.INFO)
-
     Base.metadata.create_all(bind=engine)
 
     if not BOT_TOKEN:
@@ -189,17 +222,14 @@ async def main():
     async def reg_name(message: Message, state: FSMContext):
         name = (message.text or "").strip()
 
-        # ❌ пусто
         if not name:
             await message.answer("Введите имя 🙂")
             return
 
-        # ❌ не буквы
         if not re.match(r"^[A-Za-zА-Яа-яЁё]+$", name):
             await message.answer("Имя должно содержать только буквы 🙂")
             return
 
-        # ❌ слишком длинное
         if len(name) > 20:
             await message.answer("Слишком длинное имя 🙂")
             return
@@ -214,52 +244,42 @@ async def main():
 
         try:
             birthdate = datetime.strptime(text, "%d.%m.%Y")
-
-            # ❌ дата в будущем
             if birthdate > datetime.now():
                 await message.answer("Дата не может быть из будущего 🙂")
                 return
-
-            # ❌ слишком старый (опционально)
             if birthdate.year < 1900:
                 await message.answer("Введите реальную дату 🙂")
                 return
-
-        except:
+        except Exception:
             await message.answer("Введите дату в формате 01.01.2000 🙂")
             return
 
         await state.update_data(birthdate=text)
         await state.set_state(Registration.frequency)
-
         await message.answer(
             "How often will you practice?\nКак часто ты будешь заниматься?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="Каждый день", callback_data="freq_daily")],
                 [InlineKeyboardButton(text="3 раза в неделю", callback_data="freq_3")],
                 [InlineKeyboardButton(text="1 раз в неделю", callback_data="freq_1")],
-            ])
+            ]),
         )
 
     @dp.callback_query(lambda c: c.data.startswith("freq_"))
     async def reg_freq(call: CallbackQuery, state: FSMContext):
         freq = call.data.replace("freq_", "")
         data = await state.get_data()
-
-        #BD
         db = SessionLocal()
-
         user = User(
             telegram_id=call.from_user.id,
             name=data["name"],
             birthday=data["birthdate"],
-            frequency=freq
+            frequency=freq,
+            level=DEFAULT_LEVEL,
         )
-
         db.add(user)
         db.commit()
         db.close()
-
         await state.clear()
 
         await call.message.edit_text(
@@ -268,58 +288,123 @@ async def main():
             "I recommend that you first press or enter the command /help.\n"
             "Советую сначала нажать или ввести команду /help.\n\n"
             "You can choose a mode below and choose a type of learning.\n"
-            "Вы можете выбрать режим и выбрать тип обучения.\n\n"
-            "🎯 Current level: ""Beginner""\n"
-            "If you don't know your level, try ""Beginner"" first.\n"
-            "Если вы не знаете ваш уровень, начните с ""Beginner"".",
-            reply_markup=main_menu(call.from_user.id)
+            "Вы можете выбрать режим и тип обучения.\n\n"
+            f"🎯 Current level: {level_label(DEFAULT_LEVEL)}\n"
+            f"If you don't know your level, try {level_label(DEFAULT_LEVEL)} first.\n"
+            f"Если вы не знаете ваш уровень, начните с {level_label(DEFAULT_LEVEL)}.",
+            reply_markup=main_menu(call.from_user.id),
         )
-
-
-
 
     async def show_main_menu(message: Message, state: FSMContext):
         await state.clear()
-        await message.answer(
-            "🏠 Main menu | Главное меню:" + "\n\n" + get_phrase(),
-            reply_markup=main_menu(message.from_user.id)
-        )
+        await message.answer("🏠 Main menu | Главное меню:" + "\n\n" + get_phrase(), reply_markup=main_menu(message.from_user.id))
 
     async def show_help(message: Message):
         await message.answer(
             "🧠 How to use | Как пользоваться\n\n"
-        "Все обучающие инструменты поделены на блоки,\nв каждом блоке есть несколько инструментов.\n\n"
-        "📚 Learning — обучение\n"
-        "🧠 Practice — Практика\n"
-        "🚀 Premium — Премиум функции\n"
-        "⚙️ Settings — настройки\n\n"
-
-        "Commands | Команды:\n\n"
-        "/start — меню\n"
-        "/help — помощь\n"
-        "/cancel — отмена\n"
-        "/change_level — смена уровня\n\n"
-        "Now Type /start | Далее напишите /start",
+            "Все обучающие инструменты поделены на блоки, в каждом блоке есть несколько инструментов.\n\n"
+            "📚 Learning — обучение\n"
+            "🧠 Practice — практика\n"
+            "🚀 Premium — премиум функции\n"
+            "⚙️ Settings — настройки\n\n"
+            "Commands | Команды:\n\n"
+            "/start — меню\n"
+            "/help — помощь\n"
+            "/cancel — отмена\n"
+            "/change_level — смена уровня\n\n"
+            "Now type /start | Далее напишите /start"
         )
 
     async def cancel_action(message: Message, state: FSMContext):
         await state.clear()
-        await message.answer(
-            "✅ Cancelled" + "\n\n" + get_phrase(),
-            reply_markup=main_menu(message.from_user.id)
-        )
+        await message.answer("✅ Cancelled" + "\n\n" + get_phrase(), reply_markup=main_menu(message.from_user.id))
 
     async def change_level_action(message: Message, user_id: int):
         current = get_level(user_id)
         await message.answer(
-            f"🎯 Current level: {current}\nChoose your level:",
-            reply_markup=level_kb(current)
+            f"🎯 Current level: {level_label(current)}\nChoose your level:",
+            reply_markup=level_kb(current),
+        )
+
+    async def send_level_question(message: Message, state: FSMContext):
+        data = await state.get_data()
+        questions = data["level_questions"]
+        index = data["level_index"]
+        question = questions[index]
+        await message.answer(
+            f"Question {index + 1}/5\n\n{question['question']}",
+            reply_markup=level_question_kb(question),
+        )
+
+    async def explain_level_errors(wrong_answers: list[dict], target_level: str) -> str:
+        details = "\n".join(
+            f"- Topic: {item['topic']}\n  Question: {item['question']}\n  User answer: {item['selected_answer']}\n  Correct answer: {item['correct_answer']}"
+            for item in wrong_answers
+        )
+        prompt = f"""
+Student tried to switch to {level_label(target_level)} and made mistakes.
+
+Explain briefly in Russian what went wrong.
+Name the topics the student should review.
+Be supportive, but say that it is too early to change level now.
+
+Mistakes:
+{details}
+"""
+        return ask_ai(prompt, level_label(target_level), "level_test")
+
+    async def finish_level_test(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        target_level = data["pending_level"]
+        questions = data["level_questions"]
+        answers = data["level_answers"]
+        score = 0
+        wrong_answers = []
+
+        for question, selected_index in zip(questions, answers):
+            if selected_index == question["correct_index"]:
+                score += 1
+            else:
+                wrong_answers.append({
+                    "topic": question["topic"],
+                    "question": question["question"],
+                    "selected_answer": question["options"][selected_index],
+                    "correct_answer": question["answer"],
+                })
+
+        if score == 5:
+            db = SessionLocal()
+            user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+            if user:
+                user.level = target_level
+                db.commit()
+            db.close()
+            await state.clear()
+            await call.message.answer(
+                f"✅ Test passed: {score}/5\nLevel changed to {level_label(target_level)}.",
+                reply_markup=main_menu(call.from_user.id),
+            )
+            return
+
+        topics = ", ".join(sorted({item["topic"] for item in wrong_answers}))
+        mistakes_text = "\n".join(
+            f"- {item['topic']}: your answer: {item['selected_answer']} | correct: {item['correct_answer']}"
+            for item in wrong_answers
+        )
+        explanation = await explain_level_errors(wrong_answers, target_level)
+        await state.clear()
+        await call.message.answer(
+            f"Result: {score}/5\n\n"
+            "Кажется, вам еще рано менять уровень.\n"
+            f"Посмотрите тему: {topics}\n\n"
+            f"Errors:\n{mistakes_text}\n\n"
+            f"{explanation}",
+            reply_markup=main_menu(call.from_user.id),
         )
 
     @dp.message(CommandStart())
     async def start(message: Message, state: FSMContext):
         db = SessionLocal()
-
         user = db.query(User).filter(User.telegram_id == message.from_user.id).first()
         db.close()
 
@@ -327,9 +412,7 @@ async def main():
             await show_main_menu(message, state)
         else:
             await state.set_state(Registration.name)
-            await message.answer(
-                "Hello! What's your name?\nПривет! Как тебя зовут? 👋"
-            )
+            await message.answer("Hello! What's your name?\nПривет! Как тебя зовут? 👋")
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message):
@@ -343,7 +426,6 @@ async def main():
     async def change_level_cmd(message: Message):
         await change_level_action(message, message.from_user.id)
 
-
     @dp.callback_query()
     async def cb(call: CallbackQuery, state: FSMContext):
         data = call.data
@@ -351,24 +433,57 @@ async def main():
         if data == "help":
             await show_help(call.message)
 
-
         elif data == "cancel":
             await cancel_action(call.message, state)
 
+        elif data == "level_test_cancel":
+            await state.clear()
+            await call.message.edit_text("Level change cancelled.", reply_markup=main_menu(call.from_user.id))
+
+        elif data == "level_test_yes":
+            state_data = await state.get_data()
+            target_level = state_data.get("pending_level")
+            if not target_level:
+                await state.clear()
+                await call.message.answer("Level was not selected. Try again.", reply_markup=main_menu(call.from_user.id))
+                return
+
+            await state.set_state(LevelChangeFlow.testing)
+            await state.update_data(level_questions=get_level_test(target_level), level_index=0, level_answers=[])
+            await call.message.edit_text(f"Starting test for {level_label(target_level)}.")
+            await send_level_question(call.message, state)
+
+        elif data.startswith("level_answer:"):
+            state_data = await state.get_data()
+            questions = state_data.get("level_questions")
+            index = state_data.get("level_index", 0)
+            if not questions or index >= len(questions):
+                await state.clear()
+                await call.message.answer("Test state was lost. Try again.", reply_markup=main_menu(call.from_user.id))
+                return
+
+            selected_index = int(data.split(":", 1)[1])
+            answers = state_data.get("level_answers", [])
+            answers.append(selected_index)
+            index += 1
+            await state.update_data(level_answers=answers, level_index=index)
+            await call.message.edit_reply_markup(reply_markup=None)
+
+            if index >= len(questions):
+                await finish_level_test(call, state)
+            else:
+                await send_level_question(call.message, state)
 
         elif data.startswith("mode_"):
             mode = data.replace("mode_", "")
-
             if MODES[mode]["premium"] and not is_premium(call.from_user.id):
                 await call.message.answer("🔒 This mode is available in Premium\nЭто доступно только в премиуме")
                 return
 
             await state.update_data(mode=mode)
             await state.set_state(StudyFlow.waiting_topic)
-            ags = await call.message.edit_text("Type your topic | Введите вашу тему 👇", reply_markup=cancel_kb())
-
-            asyncio.create_task(delete_later(ags, 30))
-
+            msg = await call.message.edit_text("Type your topic | Введите вашу тему 👇", reply_markup=cancel_kb())
+            asyncio.create_task(delete_later(msg, 30))
 
         elif data == "change_level":
             await change_level_action(call.message, call.from_user.id)
@@ -388,94 +503,69 @@ async def main():
         elif data == "menu_settings":
             await call.message.edit_text("⚙️ Settings | Настройки" + "\n\n" + get_phrase(), reply_markup=settings_menu(call.from_user.id))
 
-
         elif data == "back_main":
             await state.clear()
-            await call.message.edit_text(
-                "🏠 Main menu:" + "\n\n" + get_phrase(),
-                reply_markup=main_menu(call.from_user.id)
-
-            )
+            await call.message.edit_text("🏠 Main menu:" + "\n\n" + get_phrase(), reply_markup=main_menu(call.from_user.id))
 
         elif data == "glossary":
-            await call.message.edit_text(
-                "📚 Glossary\nChoose a category:",
-                reply_markup=glossary_menu()
-            )
+            await call.message.edit_text("📚 Glossary\nChoose a category:", reply_markup=glossary_menu())
 
         elif data.startswith("glossary_"):
             category = data.replace("glossary_", "")
-
-            await call.message.edit_text(
-                glossary_text(category),
-                reply_markup=glossary_menu()
-            )
+            await call.message.edit_text(glossary_text(category), reply_markup=glossary_menu())
 
         elif data == "practice":
             data_state = await state.get_data()
             topic = data_state.get("topic")
-            level = get_level(call.from_user.id)
+            level = level_label(get_level(call.from_user.id))
 
             if not topic:
                 await call.message.answer("❌ Topic lost, try again" + "\n\n" + get_phrase(), reply_markup=main_menu(call.from_user.id))
                 return
 
             await call.message.answer("Practice time 🧠")
-
             practice_prompt = f"""
-            Ты даёшь задания по английскому.
+Ты даешь задания по английскому.
 
-            Тема: {topic}
-            Уровень: {level}
+Тема: {topic}
+Уровень: {level}
 
-            Сделай РОВНО 3 задания:
+Сделай ровно 3 задания:
+1. Translate (с русского на английский)
+2. Make a sentence (дай слова в скобках)
+3. Answer the question (вопрос на английском)
 
-            1. Translate (с русского на английский)
-            2. Make a sentence (дай слова в скобках)
-            3. Answer the question (вопрос на английском)
+Правила:
+- Не смешивай языки в одном предложении
+- Пиши чисто и понятно
+- Не давай ответы
+- Без лишнего текста
 
-            Правила:
-            - Не смешивай языки в одном предложении
-            - Пиши чисто и понятно
-            - НЕ давай ответы
-            - Без лишнего текста
+Формат:
+🧠 Practice: {topic}
 
-            Формат:
+1. Translate:
+...
 
-            🧠 Practice: {topic}
+2. Make a sentence:
+(...)
 
-            1. Translate:
-            ...
-
-            2. Make a sentence:
-            (...)
-
-            3. Answer:
-            ...
-            """
-
+3. Answer:
+...
+"""
             answer = ask_ai(practice_prompt, level, "practice")
-
             await state.clear()
             await call.message.answer(answer, reply_markup=main_menu(call.from_user.id))
 
-
         elif data.startswith("set_level:"):
-            level = data.split(":", 1)[1]
-            user_id = call.from_user.id
-            db = SessionLocal()
-            user = db.query(User).filter(User.telegram_id == user_id).first()
-
-            if user:
-                user.level = level
-                db.commit()
-
-            db.close()
+            level = normalize_level(data.split(":", 1)[1])
+            await state.set_state(LevelChangeFlow.confirming)
+            await state.update_data(pending_level=level)
             await call.message.edit_text(
-                f"✅ Level set: {level}",
-                reply_markup=main_menu(user_id)
+                f"Прежде чем сменить уровень на {level_label(level)}, вам предстоит пройти небольшой тест.",
+                reply_markup=level_change_confirm_kb(),
             )
-
+            return
 
     @dp.message(StudyFlow.waiting_topic)
     async def topic_input(message: Message, state: FSMContext):
@@ -486,12 +576,9 @@ async def main():
 
         data = await state.get_data()
         mode = data.get("mode", "explain")
-        level = get_level(message.from_user.id)
-
-        frf = await message.answer("Thinking… 🤖")
-
-        asyncio.create_task(delete_later(frf, 5))
-
+        level = level_label(get_level(message.from_user.id))
+        msg = await message.answer("Thinking… 🤖")
+        asyncio.create_task(delete_later(msg, 5))
         prompt = make_user_prompt(topic, mode, level)
 
         try:
@@ -502,7 +589,7 @@ async def main():
             await message.answer("🏠 Main menu:" + "\n\n" + get_phrase(), reply_markup=main_menu(message.from_user.id))
             return
 
-        await state.update_data(topic=topic, mode = mode)
+        await state.update_data(topic=topic, mode=mode)
         if mode == "explain":
             await message.answer(answer, reply_markup=after_explain_kb())
         else:
@@ -511,6 +598,7 @@ async def main():
 
     await notify_bot_started(bot)
     await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
