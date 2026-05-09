@@ -14,13 +14,14 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from dotenv import load_dotenv
 
 from ai_client import ask_ai
-from database.db import SessionLocal, engine
-from database.models import Base, User
+from database.db import SessionLocal, engine, ensure_user_progress_columns
+from database.models import Base, User, VocabWord
 from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
 from motivation import get_phrase
-from prompts import make_user_prompt
+from prompts import make_roadmap_check_prompt, make_roadmap_lesson_prompt, make_user_prompt, make_vocab_words_prompt
+from roadmap import get_current_topic, update_progress
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -29,6 +30,9 @@ BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
 
 DEFAULT_LEVEL = "A1"
+DEFAULT_WORDS_PER_DAY = 5
+DAILY_VOCAB_HOUR = 10
+RECENT_VOCAB_HISTORY_LIMIT = 80
 LEVELS = [
     ("A1", "A1 Beginner lvl 1"),
     ("A2", "A2 Beginner lvl 2"),
@@ -174,6 +178,33 @@ def level_question_kb(question: dict):
     ])
 
 
+def learning_menu(user_id: int):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Explain", callback_data="mode_explain")],
+        [InlineKeyboardButton(text="Summary", callback_data="mode_summary")],
+        [InlineKeyboardButton(text="Vocabulary", callback_data="vocab_settings")],
+        [InlineKeyboardButton(text="To menu", callback_data="back_main")],
+    ])
+
+
+def vocab_count_kb(current_value: int | None = None):
+    rows = []
+    row = []
+
+    for value in range(3, 11):
+        prefix = "OK " if current_value == value else ""
+        row.append(InlineKeyboardButton(text=f"{prefix}{value}", callback_data=f"set_vocab_count:{value}"))
+        if len(row) == 4:
+            rows.append(row)
+            row = []
+
+    if row:
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="To menu", callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 class Registration(StatesGroup):
     name = State()
     birthdate = State()
@@ -182,6 +213,8 @@ class Registration(StatesGroup):
 
 class StudyFlow(StatesGroup):
     waiting_topic = State()
+    waiting_practice_answer = State()
+    waiting_roadmap_answer = State()
 
 
 class LevelChangeFlow(StatesGroup):
@@ -211,6 +244,7 @@ async def notify_bot_started(bot: Bot) -> None:
 async def main():
     logging.basicConfig(level=logging.INFO)
     Base.metadata.create_all(bind=engine)
+    ensure_user_progress_columns()
 
     if not BOT_TOKEN:
         raise RuntimeError(f"BOT_TOKEN is missing. Env file: {ENV_PATH}")
@@ -265,17 +299,29 @@ async def main():
             ]),
         )
 
-    @dp.callback_query(lambda c: c.data.startswith("freq_"))
+    @dp.callback_query(Registration.frequency, lambda c: c.data and c.data.startswith("freq_"))
     async def reg_freq(call: CallbackQuery, state: FSMContext):
         freq = call.data.replace("freq_", "")
         data = await state.get_data()
+        name = data.get("name")
+        birthdate = data.get("birthdate")
+
+        if not name or not birthdate:
+            await state.clear()
+            await call.message.answer("Registration data was lost. Please start again with /start.")
+            return
+
         db = SessionLocal()
         user = User(
             telegram_id=call.from_user.id,
-            name=data["name"],
-            birthday=data["birthdate"],
+            name=name,
+            birthday=birthdate,
             frequency=freq,
             level=DEFAULT_LEVEL,
+            current_topic_index=0,
+            last_result="",
+            words_per_day=None,
+            last_vocab_sent_date="",
         )
         db.add(user)
         db.commit()
@@ -283,7 +329,7 @@ async def main():
         await state.clear()
 
         await call.message.edit_text(
-            f"🔥 Готово, {data['name']}!\nНачинаем обучение 🚀\n\n"
+            f"🔥 Готово, {name}!\nНачинаем обучение 🚀\n\n"
             "🤖 I'm your AI Study Bot.\n\n"
             "I recommend that you first press or enter the command /help.\n"
             "Советую сначала нажать или ввести команду /help.\n\n"
@@ -336,6 +382,297 @@ async def main():
             reply_markup=level_question_kb(question),
         )
 
+    def normalize_vocab_key(word: str) -> str:
+        return (word or "").strip().lower()
+
+    def parse_vocab_entries(text: str) -> list[dict]:
+        entries = []
+
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            if not line or "|" not in line:
+                continue
+
+            parts = [part.strip(" -\t") for part in line.split("|")]
+            if len(parts) < 4:
+                continue
+
+            word, translation, example, example_translation = parts[:4]
+            if not word or not translation:
+                continue
+
+            entries.append({
+                "word": word,
+                "translation": translation,
+                "example": example,
+                "example_translation": example_translation,
+            })
+
+        return entries
+
+    def format_vocab_entries(entries: list[dict]) -> str:
+        lines = []
+
+        for index, entry in enumerate(entries, start=1):
+            lines.append(
+                f"{index}. {entry['word']} — {entry['translation']}\n"
+                f"   {entry['example']}\n"
+                f"   {entry['example_translation']}"
+            )
+
+        return "\n\n".join(lines)
+
+    def filter_vocab_entries(entries: list[dict], recent_words: list[str], target_count: int) -> list[dict]:
+        recent_keys = {normalize_vocab_key(word) for word in recent_words}
+        seen_keys = set()
+        result = []
+
+        for entry in entries:
+            key = normalize_vocab_key(entry["word"])
+            if not key or key in recent_keys or key in seen_keys:
+                continue
+
+            seen_keys.add(key)
+            result.append(entry)
+            if len(result) >= target_count:
+                break
+
+        return result
+
+    def save_vocab_entries(user_id: int, level: str, entries: list[dict]):
+        if not entries:
+            return
+
+        db = SessionLocal()
+        try:
+            today = datetime.now().date().isoformat()
+            for entry in entries:
+                db.add(VocabWord(
+                    telegram_id=user_id,
+                    level=level,
+                    word=entry["word"],
+                    translation=entry["translation"],
+                    example=entry["example"],
+                    example_translation=entry["example_translation"],
+                    sent_date=today,
+                ))
+            db.commit()
+        finally:
+            db.close()
+
+    async def show_vocab_settings(message: Message, user_id: int):
+        db = SessionLocal()
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        current_value = user.words_per_day if user and user.words_per_day else DEFAULT_WORDS_PER_DAY
+        db.close()
+
+        await message.answer(
+            "Vocabulary setup.\n"
+            "Choose how many new words you want per day.\n"
+            f"Usually 5-7 words per day works best for steady progress. Recommended start: {DEFAULT_WORDS_PER_DAY}.",
+            reply_markup=vocab_count_kb(current_value),
+        )
+
+    async def send_vocab_words(bot: Bot, user_id: int, force: bool = False):
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user or not user.words_per_day:
+                return False
+
+            today = datetime.now().date().isoformat()
+            if not force and user.last_vocab_sent_date == today:
+                return False
+
+            level = level_label(user.level)
+            count = user.words_per_day
+            recent_words = [
+                item.word
+                for item in db.query(VocabWord)
+                .filter(VocabWord.telegram_id == user_id)
+                .order_by(VocabWord.id.desc())
+                .limit(RECENT_VOCAB_HISTORY_LIMIT)
+                .all()
+            ]
+            requested_count = count + 5
+            raw_text = ask_ai(make_vocab_words_prompt(level, requested_count, recent_words), level, "vocabulary")
+            parsed_entries = parse_vocab_entries(raw_text)
+            final_entries = filter_vocab_entries(parsed_entries, recent_words, count)
+
+            if not final_entries:
+                return False
+
+            text = format_vocab_entries(final_entries)
+
+            await bot.send_message(
+                user_id,
+                f"Daily vocabulary\nLevel: {level}\nWords today: {len(final_entries)}\n\n{text}",
+            )
+            user.last_vocab_sent_date = today
+            db.commit()
+            save_vocab_entries(user_id, user.level, final_entries)
+            return True
+        finally:
+            db.close()
+
+    async def vocab_daily_loop(bot: Bot):
+        while True:
+            try:
+                now = datetime.now()
+                if now.hour >= DAILY_VOCAB_HOUR:
+                    db = SessionLocal()
+                    users = db.query(User).all()
+                    db.close()
+
+                    for user in users:
+                        try:
+                            await send_vocab_words(bot, user.telegram_id)
+                        except Exception as exc:
+                            logging.exception("Failed to send daily vocabulary to %s: %s", user.telegram_id, exc)
+            except Exception as exc:
+                logging.exception("Vocabulary daily loop failed: %s", exc)
+
+            await asyncio.sleep(3600)
+
+    async def send_practice_task(message: Message, state: FSMContext, answer: str, topic: str, level: str, mode: str):
+        await state.update_data(
+            topic=topic,
+            mode=mode,
+            practice_task=answer,
+            practice_topic=topic,
+            practice_level=level,
+            practice_mode=mode,
+        )
+        await state.set_state(StudyFlow.waiting_practice_answer)
+        await message.answer(answer)
+        await message.answer(
+            "Напишите ответы одним сообщением. Я проверю и дам короткий фидбэк.",
+            reply_markup=cancel_kb(),
+        )
+
+    async def check_practice_answer(message: Message, state: FSMContext, user_answer: str):
+        data = await state.get_data()
+        task = data.get("practice_task")
+        topic = data.get("practice_topic", "")
+        level = data.get("practice_level") or level_label(get_level(message.from_user.id))
+        mode = data.get("practice_mode", "practice")
+
+        if not task:
+            await state.clear()
+            await message.answer(
+                "Задание потерялось. Попробуйте начать практику заново.",
+                reply_markup=main_menu(message.from_user.id),
+            )
+            return
+
+        prompt = f"""
+Ты проверяешь ответы ученика по английскому.
+
+Тема: {topic}
+Уровень: {level}
+Тип задания: {mode}
+
+Задание, которое получил ученик:
+{task}
+
+Ответ ученика:
+{user_answer}
+
+Проверь ответ.
+Формат:
+1. Что верно
+2. Что исправить
+3. Правильный вариант, если есть ошибка
+4. Короткий совет
+
+Пиши понятно и поддерживающе.
+"""
+        msg = await message.answer("Проверяю ответы… 🤖")
+        asyncio.create_task(delete_later(msg, 5))
+        feedback = ask_ai(prompt, level, "practice_check")
+        await state.clear()
+        await message.answer(feedback, reply_markup=main_menu(message.from_user.id))
+
+    def parse_roadmap_result(answer: str) -> bool:
+        first_line = (answer or "").splitlines()[0].strip().lower()
+        return "result: correct" in first_line
+
+    async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int):
+        db = SessionLocal()
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+
+        if not user:
+            db.close()
+            await state.clear()
+            await message.answer("User not found. Please use /start first.")
+            return
+
+        topic = get_current_topic(user)
+        level = level_label(user.level)
+        simplify = user.last_result == "wrong_twice"
+        db.close()
+
+        if not topic:
+            await state.clear()
+            await message.answer(
+                "Roadmap completed. Great job.",
+                reply_markup=main_menu(user_id),
+            )
+            return
+
+        lesson = ask_ai(
+            make_roadmap_lesson_prompt(topic, level, simplify),
+            level,
+            "roadmap",
+        )
+
+        await state.update_data(
+            roadmap_topic=topic,
+            roadmap_lesson=lesson,
+        )
+        await state.set_state(StudyFlow.waiting_roadmap_answer)
+        await message.answer(f"Roadmap topic: {topic}")
+        await message.answer(lesson)
+        await message.answer(
+            "Send your answer in one message.",
+            reply_markup=cancel_kb(),
+        )
+
+    async def check_roadmap_answer(message: Message, state: FSMContext, user_answer: str):
+        state_data = await state.get_data()
+        topic = state_data.get("roadmap_topic")
+        lesson = state_data.get("roadmap_lesson")
+
+        if not topic or not lesson:
+            await state.clear()
+            await message.answer(
+                "Roadmap state was lost. Start the roadmap again.",
+                reply_markup=main_menu(message.from_user.id),
+            )
+            return
+
+        db = SessionLocal()
+        user = db.query(User).filter(User.telegram_id == message.from_user.id).first()
+        if not user:
+            db.close()
+            await state.clear()
+            await message.answer("User not found. Please use /start first.")
+            return
+
+        level = level_label(user.level)
+        review = ask_ai(
+            make_roadmap_check_prompt(topic, level, lesson, user_answer),
+            level,
+            "roadmap_check",
+        )
+        result = parse_roadmap_result(review)
+        update_progress(user, result)
+        db.commit()
+        db.close()
+
+        await message.answer(review)
+        await send_roadmap_lesson(message, state, message.from_user.id)
+
     async def explain_level_errors(wrong_answers: list[dict], target_level: str) -> str:
         details = "\n".join(
             f"- Topic: {item['topic']}\n  Question: {item['question']}\n  User answer: {item['selected_answer']}\n  Correct answer: {item['correct_answer']}"
@@ -377,6 +714,8 @@ Mistakes:
             user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
             if user:
                 user.level = target_level
+                user.current_topic_index = 0
+                user.last_result = ""
                 db.commit()
             db.close()
             await state.clear()
@@ -429,6 +768,9 @@ Mistakes:
     @dp.callback_query()
     async def cb(call: CallbackQuery, state: FSMContext):
         data = call.data
+        if not data:
+            await call.answer()
+            return
 
         if data == "help":
             await show_help(call.message)
@@ -474,10 +816,42 @@ Mistakes:
             else:
                 await send_level_question(call.message, state)
 
+        elif data == "vocab_settings":
+            await state.clear()
+            await show_vocab_settings(call.message, call.from_user.id)
+
+        elif data.startswith("set_vocab_count:"):
+            value = int(data.split(":", 1)[1])
+            if value < 3 or value > 10:
+                await call.answer("Choose a value from 3 to 10.")
+                return
+
+            db = SessionLocal()
+            user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+            if not user:
+                db.close()
+                await call.message.answer("User not found. Please use /start first.")
+                return
+
+            user.words_per_day = value
+            user.last_vocab_sent_date = ""
+            db.commit()
+            db.close()
+
+            await call.message.answer(
+                f"Vocabulary goal saved: {value} words per day.\n"
+                "Usually 5-7 words per day works best for steady progress.",
+            )
+            await send_vocab_words(bot, call.from_user.id, force=True)
+
         elif data.startswith("mode_"):
             mode = data.replace("mode_", "")
             if MODES[mode]["premium"] and not is_premium(call.from_user.id):
                 await call.message.answer("🔒 This mode is available in Premium\nЭто доступно только в премиуме")
+                return
+
+            if mode == "roadmap":
+                await send_roadmap_lesson(call.message, state, call.from_user.id)
                 return
 
             await state.update_data(mode=mode)
@@ -554,8 +928,7 @@ Mistakes:
 ...
 """
             answer = ask_ai(practice_prompt, level, "practice")
-            await state.clear()
-            await call.message.answer(answer, reply_markup=main_menu(call.from_user.id))
+            await send_practice_task(call.message, state, answer, topic, level, "practice")
 
         elif data.startswith("set_level:"):
             level = normalize_level(data.split(":", 1)[1])
@@ -592,10 +965,31 @@ Mistakes:
         await state.update_data(topic=topic, mode=mode)
         if mode == "explain":
             await message.answer(answer, reply_markup=after_explain_kb())
+        elif mode in {"quiz", "practice"}:
+            await send_practice_task(message, state, answer, topic, level, mode)
         else:
             await state.clear()
             await message.answer(answer, reply_markup=main_menu(message.from_user.id))
 
+    @dp.message(StudyFlow.waiting_practice_answer)
+    async def practice_answer_input(message: Message, state: FSMContext):
+        user_answer = (message.text or "").strip()
+        if not user_answer:
+            await message.answer("Напишите ответы текстом, пожалуйста.", reply_markup=cancel_kb())
+            return
+
+        await check_practice_answer(message, state, user_answer)
+
+    @dp.message(StudyFlow.waiting_roadmap_answer)
+    async def roadmap_answer_input(message: Message, state: FSMContext):
+        user_answer = (message.text or "").strip()
+        if not user_answer:
+            await message.answer("Please send your answer as text.", reply_markup=cancel_kb())
+            return
+
+        await check_roadmap_answer(message, state, user_answer)
+
+    asyncio.create_task(vocab_daily_loop(bot))
     await notify_bot_started(bot)
     await dp.start_polling(bot)
 

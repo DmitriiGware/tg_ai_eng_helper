@@ -1,9 +1,43 @@
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = 'sqlite:///bot.db'
+DB_PATH = Path(__file__).resolve().parent.parent / "bot.db"
+DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
 
 engine = create_engine(DATABASE_URL,echo=False)
 SessionLocal = sessionmaker(bind = engine)
 
 Base = declarative_base()
+
+
+def ensure_user_progress_columns():
+    with engine.begin() as conn:
+        columns = {
+            row[1]
+            for row in conn.exec_driver_sql("PRAGMA table_info(users)")
+        }
+
+        if not columns:
+            return
+
+        if "current_topic_index" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN current_topic_index INTEGER DEFAULT 0"
+            )
+
+        if "last_result" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_result VARCHAR DEFAULT ''"
+            )
+
+        if "words_per_day" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN words_per_day INTEGER"
+            )
+
+        if "last_vocab_sent_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_vocab_sent_date VARCHAR DEFAULT ''"
+            )

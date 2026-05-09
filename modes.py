@@ -1,30 +1,30 @@
 MODES = {
     "explain": {
-        "title": "📚 Explain",
-        "premium": False
+        "title": "Explain",
+        "premium": False,
     },
     "quiz": {
-        "title": "🧩 Quiz",
-        "premium": False
+        "title": "Quiz",
+        "premium": False,
     },
     "summary": {
-        "title": "📝 Summary",
-        "premium": False
+        "title": "Summary",
+        "premium": False,
     },
     "practice": {
-        "title": "🧠 Practice",
-        "premium": False
+        "title": "Practice",
+        "premium": False,
     },
     "chat": {
-        "title": "💬 Chat",
-        "premium": True
+        "title": "Chat",
+        "premium": True,
     },
     "roadmap": {
-        "title": "✍️ Road map",
-        "premium": True
+        "title": "Road map",
+        "premium": False,
     },
     "voice": {
-        "title": "🎤 Voice",
-        "premium": True
-    }
+        "title": "Voice",
+        "premium": True,
+    },
 }
