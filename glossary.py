@@ -1,76 +1,52 @@
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 
 def glossary_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📚 Learning", callback_data="glossary_learning")],
+        [InlineKeyboardButton(text="📘 Learning", callback_data="glossary_learning")],
         [InlineKeyboardButton(text="🧠 Practice", callback_data="glossary_practice")],
-        [InlineKeyboardButton(text="🚀 Premium", callback_data="glossary_premium")],
-        [InlineKeyboardButton(text="⚙️ Navigation", callback_data="glossary_nav")],
-        [InlineKeyboardButton(text="⬅️ Back", callback_data="back_main")]
+        [InlineKeyboardButton(text="🚀 Advanced", callback_data="glossary_premium")],
+        [InlineKeyboardButton(text="🧭 Navigation", callback_data="glossary_nav")],
+        [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_main")],
     ])
 
 
 def glossary_text(category: str):
     data = {
         "learning": (
-            "📚 Learning\n\n"
-            
-            "📚 Explain\n\n"
-            "Перевод: объяснить\n"
-            "Ты вводишь тему, бот объясняет её\n"
+            "📘 Learning\n\n"
+            "📘 Explain\n"
+            "Бот объясняет тему простыми словами.\n"
             "Пример: Present Simple\n\n"
-
-            "📝 Summary\n\n"
-            "Перевод: кратко\n"
-            "Бот делает короткий конспект\n"
-            "Пример: Past Simple"
+            "📝 Summary\n"
+            "Бот делает короткий и удобный конспект.\n"
+            "Пример: Past Simple\n\n"
+            "✨ Vocabulary\n"
+            "Бот присылает ежедневную подборку слов по вашему уровню."
         ),
-
         "practice": (
             "🧠 Practice\n\n"
-
-            "🧩 Quiz\n\n"
-            "Перевод: тест\n"
-            "Бот задаёт вопросы по теме\n\n"
-
-            "🧠 Practice\n\n"
-            "Перевод: практика\n"
-            "Бот дает несколько заданий\n"
-            "Пример: перевести предложение"
+            "🧩 Quiz\n"
+            "Мини-тест по теме без ответов заранее.\n\n"
+            "✍️ Practice\n"
+            "Практические задания с последующей проверкой."
         ),
-
         "premium": (
-            "🚀 Premium \n\n"
-
-            "💬 Chat\n\n"
-            "Перевод: чат\n"
-            "Ты общаешься на английском\n\n"
-
-            "✍️ Road map\n\n"
-            "Перевод: Путевая карта\n"
-            "Бот составляет карту изучения языка по вашему уровню языка\n\n"
-            
-
-            "🎤 Voice\n\n"
-            "Перевод: голос\n"
-            "Общение с ботом голосовыми сообщениями"
+            "🚀 Advanced\n\n"
+            "💬 Chat\n"
+            "Свободная практика и общение.\n\n"
+            "🗺 Road map\n"
+            "Пошаговое обучение по темам с адаптацией.\n\n"
+            "🎤 Voice\n"
+            "Голосовой формат взаимодействия."
         ),
-
         "nav": (
-            "⚙️ Navigation\n\n"
-
-            "⬅️ Back — назад\n"
-            "Вернуться в меню\n\n"
-
-            "❌ Cancel — отмена\n"
-            "Остановить действие\n\n"
-
-            "❓ Help — помощь\n"
-            "Показать инструкцию\n\n"
-
-            "🎯 Level — уровень\n"
-            "Выбрать сложность"
-        )
+            "🧭 Navigation\n\n"
+            "◀️ Главное меню — вернуться на главный экран\n"
+            "✖️ Отмена — остановить текущее действие\n"
+            "❔ Помощь — открыть краткую инструкцию\n"
+            "🎯 Уровень — изменить текущий уровень"
+        ),
     }
 
-    return data.get(category, "Glossary")
+    return data.get(category, "📖 Glossary")
