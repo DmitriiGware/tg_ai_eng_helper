@@ -492,11 +492,12 @@ async def main():
             "/premium — открыть Premium"
         )
 
-    async def cancel_action(message: Message, state: FSMContext):
+    async def cancel_action(message: Message, state: FSMContext, user_id: int | None = None):
+        menu_user_id = user_id or message.from_user.id
         await state.clear()
         await message.answer(
-            "✖️ Действие отменено.\n\n" + build_main_menu_text(message.from_user.id),
-            reply_markup=main_menu(message.from_user.id),
+            "✖️ Действие отменено.\n\n" + build_main_menu_text(menu_user_id),
+            reply_markup=main_menu(menu_user_id),
         )
 
     async def change_level_action(message: Message, user_id: int):
@@ -1080,7 +1081,7 @@ Mistakes:
             await notify_admin_about_premium_request(bot, call.message, call.from_user)
 
         elif data == "cancel":
-            await cancel_action(call.message, state)
+            await cancel_action(call.message, state, call.from_user.id)
 
         elif data == "level_test_cancel":
             await state.clear()
