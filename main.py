@@ -341,6 +341,53 @@ def cancel_label() -> str:
     return "✖️ Отмена"
 
 
+def mode_prompt_text(mode: str) -> str:
+    prompts = {
+        "explain": (
+            "📘 Объяснение темы\n"
+            "Напишите тему, которую хотите понять.\n\n"
+            "Примеры:\n"
+            "• Present Simple\n"
+            "• difference between much and many\n"
+            "• how to use should\n\n"
+            "После объяснения я дам мини-задание и смогу проверить ваш ответ."
+        ),
+        "summary": (
+            "📝 Краткий конспект\n"
+            "Напишите тему, и я соберу короткую шпаргалку.\n\n"
+            "Примеры:\n"
+            "• Past Simple\n"
+            "• articles a/an/the\n"
+            "• phrasal verbs with get"
+        ),
+        "quiz": (
+            "🧩 Мини-тест\n"
+            "Напишите тему, и я сделаю 5 вопросов без ответов заранее.\n\n"
+            "Примеры:\n"
+            "• Present Perfect\n"
+            "• prepositions of place\n"
+            "• conditionals"
+        ),
+        "practice": (
+            "✍️ Практика с проверкой\n"
+            "Напишите тему, и я дам 3 задания. Потом вы отправите ответы, а я проверю.\n\n"
+            "Примеры:\n"
+            "• to be\n"
+            "• comparatives\n"
+            "• job interview phrases"
+        ),
+        "chat": (
+            "💬 Чат-тренировка\n"
+            "Напишите ситуацию для диалога.\n\n"
+            "Примеры:\n"
+            "• small talk at work\n"
+            "• airport conversation\n"
+            "• job interview"
+        ),
+    }
+    return prompts.get(mode, "✍️ Напишите тему, с которой хотите поработать.")
+
+
 def build_main_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
     words_per_day = get_words_per_day(user_id)
@@ -351,14 +398,13 @@ def build_main_menu_text(user_id: int) -> str:
 
     return (
         "✨ English Hub\n"
-        "Ваш центр уроков и быстрых действий.\n\n"
-        "📊 Сводка\n"
+        "Выберите действие ниже. Самый простой старт — «Объяснить тему» или «План обучения».\n\n"
+        "Ваш прогресс\n"
         f"• Тариф: {plan}\n"
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
-        f"• Roadmap: тема {roadmap_step}\n\n"
-        f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
+        f"• План обучения: тема {roadmap_step}\n\n"
         f"💡 {get_phrase()}"
     )
 
@@ -366,29 +412,29 @@ def build_main_menu_text(user_id: int) -> str:
 def build_learning_menu_text() -> str:
     return (
         "📘 Обучение\n"
-        "Выберите, как хотите пройти материал.\n\n"
-        "• Explain — 1 AI-запрос\n"
-        "• Summary — 1 AI-запрос\n"
-        f"• Vocabulary — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
+        "Здесь можно разобрать тему или получить короткую шпаргалку.\n\n"
+        "• Объяснить тему — урок + мини-задание\n"
+        "• Конспект — короткая выжимка\n"
+        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
     )
 
 
 def build_practice_menu_text() -> str:
     return (
         "🧠 Практика\n"
-        "Блок для закрепления и ответов.\n\n"
-        "• Quiz — 1 AI-запрос на задание + 1 на проверку\n"
-        "• Practice — 1 AI-запрос на задание + 1 на проверку"
+        "Здесь бот даёт задания и проверяет ваши ответы.\n\n"
+        "• Мини-тест — 5 вопросов по теме\n"
+        "• Практика — 3 задания с проверкой"
     )
 
 
 def build_advanced_menu_text() -> str:
     return (
-        "🚀 Advanced\n"
-        "Более глубокие режимы обучения.\n\n"
-        "• Road map — доступен в Free, тратит AI-запросы\n"
-        "• Chat — только Premium\n"
-        "• Voice — только Premium"
+        "🚀 Продвинутые режимы\n"
+        "Выберите формат тренировки.\n\n"
+        "• План обучения — пошаговые темы по уровню\n"
+        "• Чат-тренировка — диалог по ситуации\n"
+        "• Голос — скоро"
     )
 
 
@@ -431,15 +477,26 @@ def build_premium_text(user_id: int) -> str:
 
 def main_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📘 Уроки", callback_data="menu_learning")],
         [
-            InlineKeyboardButton(text="🧠 Практика", callback_data="menu_practice"),
-            InlineKeyboardButton(text="🚀 Advanced", callback_data="menu_advanced"),
+            InlineKeyboardButton(text="📘 Объяснить тему", callback_data="mode_explain"),
+            InlineKeyboardButton(text="📝 Конспект", callback_data="mode_summary"),
+        ],
+        [
+            InlineKeyboardButton(text="🧩 Мини-тест", callback_data="mode_quiz"),
+            InlineKeyboardButton(text="✍️ Практика", callback_data="mode_practice"),
+        ],
+        [
+            InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap"),
+            InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
+            InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
+        ],
+        [
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
+            InlineKeyboardButton(text="📂 Разделы", callback_data="menu_learning"),
         ],
     ])
 
@@ -447,10 +504,10 @@ def main_menu(user_id: int):
 def learning_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="📘 Explain", callback_data="mode_explain"),
-            InlineKeyboardButton(text="📝 Summary", callback_data="mode_summary"),
+            InlineKeyboardButton(text="📘 Объяснить тему", callback_data="mode_explain"),
+            InlineKeyboardButton(text="📝 Конспект", callback_data="mode_summary"),
         ],
-        [InlineKeyboardButton(text="✨ Vocabulary", callback_data="vocab_settings")],
+        [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -458,8 +515,8 @@ def learning_menu(user_id: int):
 def practice_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🧩 Quiz", callback_data="mode_quiz"),
-            InlineKeyboardButton(text="✍️ Practice", callback_data="mode_practice"),
+            InlineKeyboardButton(text="🧩 Мини-тест", callback_data="mode_quiz"),
+            InlineKeyboardButton(text="✍️ Практика", callback_data="mode_practice"),
         ],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -473,10 +530,10 @@ def advanced_menu(user_id: int):
 
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text=lock("💬 Chat", "chat"), callback_data="mode_chat"),
-            InlineKeyboardButton(text=lock("🗺 Road map", "roadmap"), callback_data="mode_roadmap"),
+            InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
+            InlineKeyboardButton(text=lock("🗺 План обучения", "roadmap"), callback_data="mode_roadmap"),
         ],
-        [InlineKeyboardButton(text=lock("🎤 Voice", "voice"), callback_data="mode_voice")],
+        [InlineKeyboardButton(text=lock("🎤 Голос скоро", "voice"), callback_data="mode_voice")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -520,8 +577,8 @@ def cancel_kb():
 
 def after_explain_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Перейти к практике", callback_data="practice")],
-        [InlineKeyboardButton(text="✨ Vocabulary", callback_data="vocab_settings")],
+        [InlineKeyboardButton(text="✍️ Дать ещё практику по теме", callback_data="practice")],
+        [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -638,17 +695,17 @@ async def main():
     async def show_help(message: Message):
         await message.answer(
             "❔ Как пользоваться\n\n"
-            "• Уроки — объяснение, конспект и словарь\n"
-            "• Практика — тесты и задания с проверкой\n"
-            "• Advanced — roadmap, chat и voice\n"
-            "• Premium — безлимитный AI-доступ\n"
-            "• Профиль — уровень и быстрые настройки\n\n"
-            "Команды:\n"
-            "/start — открыть главное меню\n"
-            "/help — показать помощь\n"
-            "/cancel — отменить текущее действие\n"
-            "/change_level — изменить уровень\n"
-            "/premium — открыть Premium"
+            "1. Нажмите кнопку в главном меню.\n"
+            "2. Если бот просит тему, напишите её обычным текстом.\n"
+            "3. Если бот дал задание, отправьте ответ одним сообщением.\n\n"
+            "Что выбрать:\n"
+            "• Объяснить тему — когда хотите понять правило\n"
+            "• Конспект — когда нужна короткая шпаргалка\n"
+            "• Мини-тест — когда хотите проверить себя\n"
+            "• Практика — когда хотите задания с проверкой\n"
+            "• План обучения — когда не знаете, что учить дальше\n"
+            "• Слова на день — ежедневный словарь\n\n"
+            "Команды: /start, /help, /cancel, /premium"
         )
 
     async def cancel_action(message: Message, state: FSMContext, user_id: int | None = None):
@@ -662,7 +719,7 @@ async def main():
     async def change_level_action(message: Message, user_id: int):
         current = get_level(user_id)
         await message.answer(
-            f"🎯 Уровень пользователя\n\nСейчас: {level_label(current)}\n\nВыберите уровень вручную или пройдите тест после выбора.",
+            f"🎯 Уровень\n\nСейчас: {level_label(current)}\n\nВыберите новый уровень. После выбора бот предложит короткий тест.",
             reply_markup=level_kb(current),
         )
 
@@ -842,7 +899,7 @@ async def main():
         max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
         await message.answer(
             "✨ Настройка словаря\n"
-            "Выберите, сколько новых слов хотите получать в день.\n"
+            "Выберите, сколько новых слов присылать каждый день.\n"
             f"Free: до {FREE_MAX_WORDS_PER_DAY} слов в день.\n"
             f"Premium: до {PREMIUM_MAX_WORDS_PER_DAY} слов в день.\n"
             f"Ваш максимум сейчас: {max_words}.",
@@ -951,7 +1008,7 @@ async def main():
         await state.set_state(StudyFlow.waiting_practice_answer)
         await message.answer(answer)
         await message.answer(
-            "✍️ Напишите ответы одним сообщением. Я проверю и дам короткий фидбэк.",
+            "✍️ Напишите ответы одним сообщением, например: 1) ... 2) ... 3) ...\nЯ проверю и дам короткий фидбэк.",
             reply_markup=cancel_kb(),
         )
 
@@ -1413,13 +1470,20 @@ Mistakes:
                 await call.message.answer("🔒 Этот режим доступен только в Premium.", reply_markup=premium_kb())
                 return
 
+            if mode == "voice":
+                await call.message.answer(
+                    "🎤 Голосовой режим пока готовится.\n\nСейчас можно пользоваться текстовыми режимами: объяснение, практика, тесты и план обучения.",
+                    reply_markup=main_menu(call.from_user.id),
+                )
+                return
+
             if mode == "roadmap":
                 await send_roadmap_lesson(call.message, state, call.from_user.id)
                 return
 
             await state.update_data(mode=mode)
             await state.set_state(StudyFlow.waiting_topic)
-            msg = await call.message.edit_text("✍️ Введите тему, с которой хотите поработать.", reply_markup=cancel_kb())
+            msg = await call.message.edit_text(mode_prompt_text(mode), reply_markup=cancel_kb())
             asyncio.create_task(delete_later(msg, 30))
 
         elif data == "change_level":
@@ -1481,7 +1545,8 @@ Mistakes:
     async def topic_input(message: Message, state: FSMContext):
         topic = (message.text or "").strip()
         if not topic:
-            await message.answer("Введите тему.", reply_markup=cancel_kb())
+            data = await state.get_data()
+            await message.answer(mode_prompt_text(data.get("mode", "explain")), reply_markup=cancel_kb())
             return
 
         data = await state.get_data()
@@ -1505,7 +1570,18 @@ Mistakes:
 
         await state.update_data(topic=topic, mode=mode)
         if mode == "explain":
+            await state.update_data(
+                practice_task=answer,
+                practice_topic=topic,
+                practice_level=level,
+                practice_mode="explain",
+            )
+            await state.set_state(StudyFlow.waiting_practice_answer)
             await message.answer(answer, reply_markup=after_explain_kb())
+            await message.answer(
+                "✍️ В конце урока есть мини-задание. Отправьте ответ одним сообщением, и я его проверю.\n\nЕсли хотите просто выйти, нажмите «Главное меню».",
+                reply_markup=cancel_kb(),
+            )
         elif mode in {"quiz", "practice"}:
             await send_practice_task(message, state, answer, topic, level, mode)
         else:
@@ -1516,7 +1592,7 @@ Mistakes:
     async def practice_answer_input(message: Message, state: FSMContext):
         user_answer = (message.text or "").strip()
         if not user_answer:
-            await message.answer("Напишите ответ текстом.", reply_markup=cancel_kb())
+            await message.answer("Напишите ответ текстом одним сообщением. Если передумали, нажмите «Отмена».", reply_markup=cancel_kb())
             return
 
         await check_practice_answer(message, state, user_answer)
@@ -1525,7 +1601,7 @@ Mistakes:
     async def roadmap_answer_input(message: Message, state: FSMContext):
         user_answer = (message.text or "").strip()
         if not user_answer:
-            await message.answer("Напишите ответ текстом.", reply_markup=cancel_kb())
+            await message.answer("Напишите ответ текстом одним сообщением. Если передумали, нажмите «Отмена».", reply_markup=cancel_kb())
             return
 
         await check_roadmap_answer(message, state, user_answer)

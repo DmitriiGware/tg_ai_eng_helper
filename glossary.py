@@ -3,10 +3,10 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 def glossary_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📘 Learning", callback_data="glossary_learning")],
-        [InlineKeyboardButton(text="🧠 Practice", callback_data="glossary_practice")],
-        [InlineKeyboardButton(text="🚀 Advanced", callback_data="glossary_premium")],
-        [InlineKeyboardButton(text="🧭 Navigation", callback_data="glossary_nav")],
+        [InlineKeyboardButton(text="📘 Обучение", callback_data="glossary_learning")],
+        [InlineKeyboardButton(text="🧠 Практика", callback_data="glossary_practice")],
+        [InlineKeyboardButton(text="🚀 Продвинутые режимы", callback_data="glossary_premium")],
+        [InlineKeyboardButton(text="🧭 Навигация", callback_data="glossary_nav")],
         [InlineKeyboardButton(text="◀️ Главное меню", callback_data="back_main")],
     ])
 
@@ -14,34 +14,34 @@ def glossary_menu():
 def glossary_text(category: str):
     data = {
         "learning": (
-            "📘 Learning\n\n"
-            "📘 Explain\n"
-            "Бот объясняет тему простыми словами.\n"
+            "📘 Обучение\n\n"
+            "📘 Объяснить тему\n"
+            "Бот объясняет правило, даёт примеры и мини-задание.\n"
             "Пример: Present Simple\n\n"
-            "📝 Summary\n"
-            "Бот делает короткий и удобный конспект.\n"
+            "📝 Конспект\n"
+            "Бот делает короткую шпаргалку по теме.\n"
             "Пример: Past Simple\n\n"
-            "✨ Vocabulary\n"
+            "✨ Слова на день\n"
             "Бот присылает ежедневную подборку слов по вашему уровню."
         ),
         "practice": (
-            "🧠 Practice\n\n"
-            "🧩 Quiz\n"
+            "🧠 Практика\n\n"
+            "🧩 Мини-тест\n"
             "Мини-тест по теме без ответов заранее.\n\n"
-            "✍️ Practice\n"
+            "✍️ Практика\n"
             "Практические задания с последующей проверкой."
         ),
         "premium": (
-            "🚀 Advanced\n\n"
-            "💬 Chat\n"
-            "Свободная практика и общение.\n\n"
-            "🗺 Road map\n"
+            "🚀 Продвинутые режимы\n\n"
+            "🗺 План обучения\n"
             "Пошаговое обучение по темам с адаптацией.\n\n"
-            "🎤 Voice\n"
-            "Голосовой формат взаимодействия."
+            "💬 Чат-тренировка\n"
+            "Тренировка диалога по ситуации.\n\n"
+            "🎤 Голос\n"
+            "Голосовой формат, который будет подключен позже."
         ),
         "nav": (
-            "🧭 Navigation\n\n"
+            "🧭 Навигация\n\n"
             "◀️ Главное меню — вернуться на главный экран\n"
             "✖️ Отмена — остановить текущее действие\n"
             "❔ Помощь — открыть краткую инструкцию\n"
