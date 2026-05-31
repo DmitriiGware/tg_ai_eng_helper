@@ -56,3 +56,18 @@ def ensure_user_progress_columns():
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN ai_requests_count INTEGER DEFAULT 0"
             )
+
+        if "pending_yookassa_payment_id" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN pending_yookassa_payment_id VARCHAR DEFAULT ''"
+            )
+
+        if "pending_yookassa_payment_url" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN pending_yookassa_payment_url VARCHAR DEFAULT ''"
+            )
+
+        if "last_telegram_payment_charge_id" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_telegram_payment_charge_id VARCHAR DEFAULT ''"
+            )

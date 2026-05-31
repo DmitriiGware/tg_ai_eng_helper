@@ -4,13 +4,14 @@ import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery
 from dotenv import load_dotenv
 
 from ai_client import ask_ai
@@ -29,6 +30,11 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
 PREMIUM_PAYMENT_TEXT = (os.getenv("PREMIUM_PAYMENT_TEXT") or "Способ оплаты уточняется у администратора.").strip()
+YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
+YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
+YOOKASSA_RETURN_URL = (os.getenv("YOOKASSA_RETURN_URL") or "https://t.me/").strip()
+PREMIUM_PRICE_RUB = (os.getenv("PREMIUM_PRICE_RUB") or "299.00").strip()
+PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "150").strip())
 
 DEFAULT_LEVEL = "A1"
 DEFAULT_WORDS_PER_DAY = 5
@@ -81,6 +87,16 @@ def is_admin(user_id: int | None) -> bool:
     if user_id is None or not ADMIN_TELEGRAM_ID:
         return False
     return str(user_id) == ADMIN_TELEGRAM_ID
+
+
+def is_yookassa_configured() -> bool:
+    return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+
+
+def object_value(obj, key: str):
+    if isinstance(obj, dict):
+        return obj.get(key)
+    return getattr(obj, key, None)
 
 
 def is_premium_user(user: User | None) -> bool:
@@ -161,6 +177,100 @@ def grant_premium(user_id: int, days: int = DEFAULT_PREMIUM_DAYS) -> str | None:
         return user.premium_until
     finally:
         db.close()
+
+
+def save_pending_yookassa_payment(user_id: int, payment_id: str, confirmation_url: str) -> None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if user:
+            user.pending_yookassa_payment_id = payment_id
+            user.pending_yookassa_payment_url = confirmation_url
+            db.commit()
+    finally:
+        db.close()
+
+
+def get_pending_yookassa_payment(user_id: int) -> tuple[str, str]:
+    user = get_user(user_id)
+    if not user:
+        return "", ""
+    return user.pending_yookassa_payment_id or "", user.pending_yookassa_payment_url or ""
+
+
+def clear_pending_yookassa_payment(user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if user:
+            user.pending_yookassa_payment_id = ""
+            user.pending_yookassa_payment_url = ""
+            db.commit()
+    finally:
+        db.close()
+
+
+def save_telegram_payment_charge(user_id: int, charge_id: str) -> None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if user:
+            user.last_telegram_payment_charge_id = charge_id
+            db.commit()
+    finally:
+        db.close()
+
+
+def create_yookassa_payment_sync(user_id: int) -> tuple[str, str, str]:
+    if not is_yookassa_configured():
+        raise RuntimeError("YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY are not configured.")
+
+    try:
+        from yookassa import Configuration, Payment
+    except ImportError as exc:
+        raise RuntimeError("Package yookassa is not installed. Run: pip install yookassa") from exc
+
+    Configuration.configure(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
+    payment = Payment.create(
+        {
+            "amount": {
+                "value": PREMIUM_PRICE_RUB,
+                "currency": "RUB",
+            },
+            "capture": True,
+            "confirmation": {
+                "type": "redirect",
+                "return_url": YOOKASSA_RETURN_URL,
+            },
+            "description": f"English Hub Premium {DEFAULT_PREMIUM_DAYS} days",
+            "metadata": {
+                "telegram_id": str(user_id),
+                "product": "premium",
+                "days": str(DEFAULT_PREMIUM_DAYS),
+            },
+        },
+        str(uuid4()),
+    )
+    confirmation = object_value(payment, "confirmation") or {}
+    confirmation_url = object_value(confirmation, "confirmation_url")
+    if not confirmation_url:
+        raise RuntimeError("YooKassa did not return confirmation_url.")
+
+    return object_value(payment, "id"), object_value(payment, "status"), confirmation_url
+
+
+def get_yookassa_payment_status_sync(payment_id: str) -> str:
+    if not is_yookassa_configured():
+        raise RuntimeError("YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY are not configured.")
+
+    try:
+        from yookassa import Configuration, Payment
+    except ImportError as exc:
+        raise RuntimeError("Package yookassa is not installed. Run: pip install yookassa") from exc
+
+    Configuration.configure(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
+    payment = Payment.find_one(payment_id)
+    return object_value(payment, "status") or ""
 
 
 def premium_limit_text() -> str:
@@ -268,6 +378,7 @@ def build_settings_menu_text(user_id: int) -> str:
 def build_premium_text(user_id: int) -> str:
     status = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
+    yookassa_text = f"{PREMIUM_PRICE_RUB} RUB через ЮKassa" if is_yookassa_configured() else "ЮKassa не настроена"
 
     return (
         "💎 Premium\n"
@@ -279,9 +390,10 @@ def build_premium_text(user_id: int) -> str:
         "• roadmap без ограничений\n"
         "• доступ к Chat и Voice, когда они подключены\n"
         "• приоритет для новых функций\n\n"
+        f"Telegram Stars: {PREMIUM_STARS_PRICE} ⭐\n"
+        f"Карта: {yookassa_text}\n"
         f"Оплата: {PREMIUM_PAYMENT_TEXT}\n\n"
-        "Чтобы подключить Premium, оплатите доступ выбранным способом и нажмите кнопку ниже. "
-        "Администратор проверит оплату и выдаст доступ."
+        "Выберите удобный способ оплаты ниже."
     )
 
 
@@ -349,8 +461,21 @@ def settings_menu(user_id: int):
 
 
 def premium_kb():
+    rows = [
+        [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="premium_stars")],
+    ]
+    if is_yookassa_configured():
+        rows.append([InlineKeyboardButton(text="💳 Оплатить картой", callback_data="premium_yookassa")])
+        rows.append([InlineKeyboardButton(text="🔄 Проверить оплату картой", callback_data="premium_check")])
+    rows.append([InlineKeyboardButton(text="🧾 Ручная проверка", callback_data="premium_request")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def yookassa_payment_kb(confirmation_url: str):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="premium_request")],
+        [InlineKeyboardButton(text="💳 Перейти к оплате", url=confirmation_url)],
+        [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data="premium_check")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -510,6 +635,71 @@ async def main():
     async def show_premium(message: Message, user_id: int):
         await message.answer(build_premium_text(user_id), reply_markup=premium_kb())
 
+    async def send_stars_invoice(bot: Bot, user_id: int):
+        payload = f"premium_stars:{user_id}:{uuid4().hex[:16]}"
+        await bot.send_invoice(
+            chat_id=user_id,
+            title=f"Premium на {DEFAULT_PREMIUM_DAYS} дней",
+            description="Безлимитные AI-объяснения, проверка практики и roadmap.",
+            payload=payload,
+            provider_token="",
+            currency="XTR",
+            prices=[LabeledPrice(label="Premium", amount=PREMIUM_STARS_PRICE)],
+        )
+
+    async def create_yookassa_payment(message: Message, user_id: int):
+        if not is_yookassa_configured():
+            await message.answer(
+                "ЮKassa пока не настроена. Добавьте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env.",
+                reply_markup=premium_kb(),
+            )
+            return
+
+        try:
+            payment_id, status, confirmation_url = await asyncio.to_thread(create_yookassa_payment_sync, user_id)
+        except Exception as exc:
+            logging.exception("Failed to create YooKassa payment: %s", exc)
+            await message.answer(f"Не получилось создать платеж ЮKassa: {exc}", reply_markup=premium_kb())
+            return
+
+        save_pending_yookassa_payment(user_id, payment_id, confirmation_url)
+        await message.answer(
+            f"💳 Платеж создан.\nСтатус: {status}\nСумма: {PREMIUM_PRICE_RUB} RUB\n\nПосле оплаты вернитесь в бот и нажмите «Проверить оплату».",
+            reply_markup=yookassa_payment_kb(confirmation_url),
+        )
+
+    async def check_yookassa_payment(message: Message, user_id: int):
+        payment_id, confirmation_url = get_pending_yookassa_payment(user_id)
+        if not payment_id:
+            await message.answer("Активного платежа ЮKassa нет. Создайте новый платеж.", reply_markup=premium_kb())
+            return
+
+        try:
+            status = await asyncio.to_thread(get_yookassa_payment_status_sync, payment_id)
+        except Exception as exc:
+            logging.exception("Failed to check YooKassa payment: %s", exc)
+            await message.answer(f"Не получилось проверить платеж ЮKassa: {exc}", reply_markup=premium_kb())
+            return
+
+        if status == "succeeded":
+            premium_until = grant_premium(user_id, DEFAULT_PREMIUM_DAYS)
+            clear_pending_yookassa_payment(user_id)
+            await message.answer(
+                f"✅ Оплата прошла. Premium активирован до {premium_until}.",
+                reply_markup=main_menu(user_id),
+            )
+            return
+
+        if status == "canceled":
+            clear_pending_yookassa_payment(user_id)
+            await message.answer("Платеж отменен. Можно создать новый платеж.", reply_markup=premium_kb())
+            return
+
+        await message.answer(
+            f"Платеж пока не завершен.\nСтатус: {status}",
+            reply_markup=yookassa_payment_kb(confirmation_url) if confirmation_url else premium_kb(),
+        )
+
     async def ensure_ai_quota(message: Message, user_id: int) -> bool:
         allowed, remaining = consume_ai_request(user_id)
         if allowed:
@@ -668,6 +858,9 @@ async def main():
         await bot.send_message(
             user_id,
             f"✨ Daily vocabulary\nУровень: {level}\nСлов сегодня: {len(final_entries)}\n\n{format_vocab_entries(final_entries)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+            ]),
         )
 
         db = SessionLocal()
@@ -993,6 +1186,9 @@ Mistakes:
                 premium_until="",
                 ai_requests_date="",
                 ai_requests_count=0,
+                pending_yookassa_payment_id="",
+                pending_yookassa_payment_url="",
+                last_telegram_payment_charge_id="",
             )
             db.add(user)
             db.commit()
@@ -1064,6 +1260,33 @@ Mistakes:
         except Exception as exc:
             logging.exception("Failed to notify premium user %s: %s", target_user_id, exc)
 
+    @dp.pre_checkout_query()
+    async def pre_checkout_query(query: PreCheckoutQuery):
+        payload = query.invoice_payload or ""
+        if payload.startswith("premium_stars:"):
+            await bot.answer_pre_checkout_query(query.id, ok=True)
+            return
+
+        await bot.answer_pre_checkout_query(
+            query.id,
+            ok=False,
+            error_message="Неизвестный платеж. Попробуйте создать счет заново.",
+        )
+
+    @dp.message(lambda message: message.successful_payment is not None)
+    async def successful_payment(message: Message):
+        payment = message.successful_payment
+        payload = payment.invoice_payload or ""
+        if not payload.startswith("premium_stars:"):
+            return
+
+        premium_until = grant_premium(message.from_user.id, DEFAULT_PREMIUM_DAYS)
+        save_telegram_payment_charge(message.from_user.id, payment.telegram_payment_charge_id)
+        await message.answer(
+            f"✅ Оплата Stars прошла. Premium активирован до {premium_until}.",
+            reply_markup=main_menu(message.from_user.id),
+        )
+
     @dp.callback_query()
     async def cb(call: CallbackQuery, state: FSMContext):
         data = call.data
@@ -1076,6 +1299,15 @@ Mistakes:
 
         elif data == "premium":
             await show_premium(call.message, call.from_user.id)
+
+        elif data == "premium_stars":
+            await send_stars_invoice(bot, call.from_user.id)
+
+        elif data == "premium_yookassa":
+            await create_yookassa_payment(call.message, call.from_user.id)
+
+        elif data == "premium_check":
+            await check_yookassa_payment(call.message, call.from_user.id)
 
         elif data == "premium_request":
             await notify_admin_about_premium_request(bot, call.message, call.from_user)

@@ -17,6 +17,9 @@ class User(Base):
     premium_until = Column(String, default="")
     ai_requests_date = Column(String, default="")
     ai_requests_count = Column(Integer, default=0)
+    pending_yookassa_payment_id = Column(String, default="")
+    pending_yookassa_payment_url = Column(String, default="")
+    last_telegram_payment_charge_id = Column(String, default="")
 
 
 class VocabWord(Base):
