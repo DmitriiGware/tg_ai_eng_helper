@@ -14,6 +14,9 @@ class User(Base):
     last_result = Column(String, default="")
     words_per_day = Column(Integer, nullable=True)
     last_vocab_sent_date = Column(String, default="")
+    premium_until = Column(String, default="")
+    ai_requests_date = Column(String, default="")
+    ai_requests_count = Column(Integer, default=0)
 
 
 class VocabWord(Base):

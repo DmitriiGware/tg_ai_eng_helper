@@ -41,3 +41,18 @@ def ensure_user_progress_columns():
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN last_vocab_sent_date VARCHAR DEFAULT ''"
             )
+
+        if "premium_until" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN premium_until VARCHAR DEFAULT ''"
+            )
+
+        if "ai_requests_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN ai_requests_date VARCHAR DEFAULT ''"
+            )
+
+        if "ai_requests_count" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN ai_requests_count INTEGER DEFAULT 0"
+            )

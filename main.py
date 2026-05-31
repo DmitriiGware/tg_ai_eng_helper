@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
@@ -28,11 +28,14 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
+PREMIUM_PAYMENT_TEXT = (os.getenv("PREMIUM_PAYMENT_TEXT") or "Способ оплаты уточняется у администратора.").strip()
 
 DEFAULT_LEVEL = "A1"
 DEFAULT_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 RECENT_VOCAB_HISTORY_LIMIT = 80
+FREE_DAILY_AI_LIMIT = 5
+DEFAULT_PREMIUM_DAYS = 30
 
 LEVELS = [
     ("A1", "A1 Beginner lvl 1"),
@@ -62,16 +65,109 @@ def level_label(level: str | None) -> str:
     return LEVEL_LABELS[normalize_level(level)]
 
 
-def is_premium(user_id: int) -> bool:
-    return False
-
-
 def get_user(user_id: int) -> User | None:
     db = SessionLocal()
     try:
         return db.query(User).filter(User.telegram_id == user_id).first()
     finally:
         db.close()
+
+
+def today_key() -> str:
+    return datetime.now().date().isoformat()
+
+
+def is_admin(user_id: int | None) -> bool:
+    if user_id is None or not ADMIN_TELEGRAM_ID:
+        return False
+    return str(user_id) == ADMIN_TELEGRAM_ID
+
+
+def is_premium_user(user: User | None) -> bool:
+    if not user or not user.premium_until:
+        return False
+
+    try:
+        premium_until = datetime.strptime(user.premium_until, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+
+    return premium_until >= datetime.now().date()
+
+
+def is_premium(user_id: int) -> bool:
+    return is_premium_user(get_user(user_id))
+
+
+def get_premium_status_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if is_premium_user(user):
+        return f"Premium до {user.premium_until}"
+    return "Free"
+
+
+def get_ai_usage_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if is_premium_user(user):
+        return "без лимита"
+
+    count = 0
+    if user and user.ai_requests_date == today_key() and user.ai_requests_count:
+        count = user.ai_requests_count
+
+    remaining = max(FREE_DAILY_AI_LIMIT - count, 0)
+    return f"{remaining}/{FREE_DAILY_AI_LIMIT} AI-запросов сегодня"
+
+
+def consume_ai_request(user_id: int) -> tuple[bool, int]:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return False, 0
+
+        if is_premium_user(user):
+            return True, -1
+
+        today = today_key()
+        if user.ai_requests_date != today:
+            user.ai_requests_date = today
+            user.ai_requests_count = 0
+
+        if (user.ai_requests_count or 0) >= FREE_DAILY_AI_LIMIT:
+            return False, 0
+
+        user.ai_requests_count = (user.ai_requests_count or 0) + 1
+        remaining = max(FREE_DAILY_AI_LIMIT - user.ai_requests_count, 0)
+        db.commit()
+        return True, remaining
+    finally:
+        db.close()
+
+
+def grant_premium(user_id: int, days: int = DEFAULT_PREMIUM_DAYS) -> str | None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return None
+
+        base_date = datetime.now().date()
+        if is_premium_user(user):
+            base_date = datetime.strptime(user.premium_until, "%Y-%m-%d").date()
+
+        user.premium_until = (base_date + timedelta(days=days)).isoformat()
+        db.commit()
+        return user.premium_until
+    finally:
+        db.close()
+
+
+def premium_limit_text() -> str:
+    return (
+        "Дневной лимит Free закончился.\n\n"
+        "В Premium доступны безлимитные AI-объяснения, проверка ответов, roadmap, chat и voice."
+    )
 
 
 def get_level(user_id: int) -> str:
@@ -106,11 +202,15 @@ def build_main_menu_text(user_id: int) -> str:
     words_per_day = get_words_per_day(user_id)
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
     roadmap_step = get_current_topic_number(user_id)
+    plan = get_premium_status_text(user_id)
+    ai_usage = get_ai_usage_text(user_id)
 
     return (
         "✨ English Hub\n"
         "Ваш центр уроков и быстрых действий.\n\n"
         "📊 Сводка\n"
+        f"• Тариф: {plan}\n"
+        f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
         f"• Roadmap: тема {roadmap_step}\n\n"
@@ -151,13 +251,37 @@ def build_settings_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
     words_per_day = get_words_per_day(user_id)
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
+    plan = get_premium_status_text(user_id)
+    ai_usage = get_ai_usage_text(user_id)
 
     return (
         "⚙️ Профиль и настройки\n"
         "Ваши текущие параметры обучения.\n\n"
+        f"• Тариф: {plan}\n"
+        f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n\n"
         "Здесь можно поменять уровень и открыть справку."
+    )
+
+
+def build_premium_text(user_id: int) -> str:
+    status = get_premium_status_text(user_id)
+    ai_usage = get_ai_usage_text(user_id)
+
+    return (
+        "💎 Premium\n"
+        f"Статус: {status}\n"
+        f"AI сегодня: {ai_usage}\n\n"
+        "Что входит:\n"
+        "• безлимитные AI-объяснения и конспекты\n"
+        "• проверка практики без дневного лимита\n"
+        "• roadmap без ограничений\n"
+        "• доступ к Chat и Voice, когда они подключены\n"
+        "• приоритет для новых функций\n\n"
+        f"Оплата: {PREMIUM_PAYMENT_TEXT}\n\n"
+        "Чтобы подключить Premium, оплатите доступ выбранным способом и нажмите кнопку ниже. "
+        "Администратор проверит оплату и выдаст доступ."
     )
 
 
@@ -168,6 +292,7 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="🧠 Практика", callback_data="menu_practice"),
             InlineKeyboardButton(text="🚀 Advanced", callback_data="menu_advanced"),
         ],
+        [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
@@ -218,6 +343,14 @@ def settings_menu(user_id: int):
             InlineKeyboardButton(text="🎯 Уровень", callback_data="change_level"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
         ],
+        [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def premium_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Я оплатил", callback_data="premium_request")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -349,12 +482,14 @@ async def main():
             "• Уроки — объяснение, конспект и словарь\n"
             "• Практика — тесты и задания с проверкой\n"
             "• Advanced — roadmap, chat и voice\n"
+            "• Premium — безлимитный AI-доступ\n"
             "• Профиль — уровень и быстрые настройки\n\n"
             "Команды:\n"
             "/start — открыть главное меню\n"
             "/help — показать помощь\n"
             "/cancel — отменить текущее действие\n"
-            "/change_level — изменить уровень"
+            "/change_level — изменить уровень\n"
+            "/premium — открыть Premium"
         )
 
     async def cancel_action(message: Message, state: FSMContext):
@@ -370,6 +505,49 @@ async def main():
             f"🎯 Уровень пользователя\n\nСейчас: {level_label(current)}\n\nВыберите уровень вручную или пройдите тест после выбора.",
             reply_markup=level_kb(current),
         )
+
+    async def show_premium(message: Message, user_id: int):
+        await message.answer(build_premium_text(user_id), reply_markup=premium_kb())
+
+    async def ensure_ai_quota(message: Message, user_id: int) -> bool:
+        allowed, remaining = consume_ai_request(user_id)
+        if allowed:
+            if remaining >= 0 and remaining <= 1:
+                await message.answer(f"ℹ️ Осталось AI-запросов сегодня: {remaining}/{FREE_DAILY_AI_LIMIT}.")
+            return True
+
+        await message.answer(premium_limit_text(), reply_markup=premium_kb())
+        return False
+
+    async def notify_admin_about_premium_request(bot: Bot, message: Message, requester):
+        if not ADMIN_TELEGRAM_ID:
+            await message.answer(
+                "Заявка зафиксирована, но TELEGRAM_ADMIN_ID не настроен. Администратору нужно добавить его в .env.",
+                reply_markup=main_menu(requester.id),
+            )
+            return
+
+        username = f"@{requester.username}" if requester.username else "без username"
+        text = (
+            "💎 Premium request\n\n"
+            f"User ID: {requester.id}\n"
+            f"Name: {requester.full_name}\n"
+            f"Username: {username}\n\n"
+            f"Выдать доступ: /grant_premium {requester.id} {DEFAULT_PREMIUM_DAYS}"
+        )
+
+        try:
+            await bot.send_message(int(ADMIN_TELEGRAM_ID), text)
+            await message.answer(
+                "✅ Заявка отправлена администратору. После проверки оплаты Premium будет включен.",
+                reply_markup=main_menu(requester.id),
+            )
+        except Exception as exc:
+            logging.exception("Failed to send premium request to admin: %s", exc)
+            await message.answer(
+                "Не получилось отправить заявку администратору. Попробуйте позже.",
+                reply_markup=main_menu(requester.id),
+            )
 
     async def send_level_question(message: Message, state: FSMContext):
         data = await state.get_data()
@@ -434,27 +612,6 @@ async def main():
 
         return result
 
-    def save_vocab_entries(user_id: int, level: str, entries: list[dict]):
-        if not entries:
-            return
-
-        db = SessionLocal()
-        try:
-            today = datetime.now().date().isoformat()
-            for entry in entries:
-                db.add(VocabWord(
-                    telegram_id=user_id,
-                    level=level,
-                    word=entry["word"],
-                    translation=entry["translation"],
-                    example=entry["example"],
-                    example_translation=entry["example_translation"],
-                    sent_date=today,
-                ))
-            db.commit()
-        finally:
-            db.close()
-
     async def show_vocab_settings(message: Message, user_id: int):
         current_value = get_words_per_day(user_id) or DEFAULT_WORDS_PER_DAY
         await message.answer(
@@ -471,11 +628,13 @@ async def main():
             if not user or not user.words_per_day:
                 return False
 
-            today = datetime.now().date().isoformat()
+            today = today_key()
             if not force and user.last_vocab_sent_date == today:
                 return False
 
-            level = level_label(user.level)
+            user_is_premium = is_premium_user(user)
+            level_code = user.level
+            level = level_label(level_code)
             count = user.words_per_day
             recent_words = [
                 item.word
@@ -485,23 +644,47 @@ async def main():
                 .limit(RECENT_VOCAB_HISTORY_LIMIT)
                 .all()
             ]
-            raw_text = ask_ai(
-                make_vocab_words_prompt(level, count + 5, recent_words),
-                level,
-                "vocabulary",
-            )
-            parsed_entries = parse_vocab_entries(raw_text)
-            final_entries = filter_vocab_entries(parsed_entries, recent_words, count)
-            if not final_entries:
+        finally:
+            db.close()
+
+        if not user_is_premium:
+            allowed, _ = consume_ai_request(user_id)
+            if not allowed:
+                if force:
+                    await bot.send_message(user_id, premium_limit_text(), reply_markup=premium_kb())
                 return False
 
-            await bot.send_message(
-                user_id,
-                f"✨ Daily vocabulary\nУровень: {level}\nСлов сегодня: {len(final_entries)}\n\n{format_vocab_entries(final_entries)}",
-            )
-            user.last_vocab_sent_date = today
-            db.commit()
-            save_vocab_entries(user_id, user.level, final_entries)
+        raw_text = ask_ai(
+            make_vocab_words_prompt(level, count + 5, recent_words),
+            level,
+            "vocabulary",
+        )
+        parsed_entries = parse_vocab_entries(raw_text)
+        final_entries = filter_vocab_entries(parsed_entries, recent_words, count)
+        if not final_entries:
+            return False
+
+        await bot.send_message(
+            user_id,
+            f"✨ Daily vocabulary\nУровень: {level}\nСлов сегодня: {len(final_entries)}\n\n{format_vocab_entries(final_entries)}",
+        )
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if user:
+                user.last_vocab_sent_date = today
+                for entry in final_entries:
+                    db.add(VocabWord(
+                        telegram_id=user_id,
+                        level=level_code,
+                        word=entry["word"],
+                        translation=entry["translation"],
+                        example=entry["example"],
+                        example_translation=entry["example_translation"],
+                        sent_date=today,
+                    ))
+                db.commit()
             return True
         finally:
             db.close()
@@ -576,6 +759,10 @@ async def main():
 3. Правильный вариант, если есть ошибка
 4. Короткий совет
 """
+        if not await ensure_ai_quota(message, message.from_user.id):
+            await state.clear()
+            return
+
         msg = await message.answer("🤖 Проверяю ответы...")
         asyncio.create_task(delete_later(msg, 5))
         feedback = ask_ai(prompt, level, "practice_check")
@@ -606,6 +793,10 @@ async def main():
             await message.answer("✅ Roadmap completed.", reply_markup=main_menu(user_id))
             return
 
+        if not await ensure_ai_quota(message, user_id):
+            await state.clear()
+            return
+
         lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
         await state.update_data(roadmap_topic=topic, roadmap_lesson=lesson)
         await state.set_state(StudyFlow.waiting_roadmap_answer)
@@ -624,6 +815,15 @@ async def main():
                 "Состояние roadmap потеряно. Запустите его снова.",
                 reply_markup=main_menu(message.from_user.id),
             )
+            return
+
+        if not get_user(message.from_user.id):
+            await state.clear()
+            await message.answer("User not found. Please use /start first.")
+            return
+
+        if not await ensure_ai_quota(message, message.from_user.id):
+            await state.clear()
             return
 
         db = SessionLocal()
@@ -705,6 +905,10 @@ Mistakes:
             f"- {item['topic']}: ваш ответ — {item['selected_answer']} | правильный — {item['correct_answer']}"
             for item in wrong_answers
         )
+        if not await ensure_ai_quota(call.message, call.from_user.id):
+            await state.clear()
+            return
+
         explanation = await explain_level_errors(wrong_answers, target_level)
         await state.clear()
         await call.message.answer(
@@ -785,6 +989,9 @@ Mistakes:
                 last_result="",
                 words_per_day=None,
                 last_vocab_sent_date="",
+                premium_until="",
+                ai_requests_date="",
+                ai_requests_count=0,
             )
             db.add(user)
             db.commit()
@@ -819,6 +1026,43 @@ Mistakes:
     async def change_level_cmd(message: Message):
         await change_level_action(message, message.from_user.id)
 
+    @dp.message(Command("premium"))
+    async def premium_cmd(message: Message):
+        await show_premium(message, message.from_user.id)
+
+    @dp.message(Command("grant_premium"))
+    async def grant_premium_cmd(message: Message):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer(f"Формат: /grant_premium USER_ID DAYS\nПример: /grant_premium 123456789 {DEFAULT_PREMIUM_DAYS}")
+            return
+
+        try:
+            target_user_id = int(parts[1])
+            days = int(parts[2]) if len(parts) > 2 else DEFAULT_PREMIUM_DAYS
+        except ValueError:
+            await message.answer("USER_ID и DAYS должны быть числами.")
+            return
+
+        if days <= 0:
+            await message.answer("DAYS должен быть больше 0.")
+            return
+
+        premium_until = grant_premium(target_user_id, days)
+        if not premium_until:
+            await message.answer("Пользователь не найден. Он должен сначала открыть /start.")
+            return
+
+        await message.answer(f"✅ Premium выдан пользователю {target_user_id} до {premium_until}.")
+        try:
+            await bot.send_message(target_user_id, f"💎 Premium активирован до {premium_until}.")
+        except Exception as exc:
+            logging.exception("Failed to notify premium user %s: %s", target_user_id, exc)
+
     @dp.callback_query()
     async def cb(call: CallbackQuery, state: FSMContext):
         data = call.data
@@ -828,6 +1072,12 @@ Mistakes:
 
         if data == "help":
             await show_help(call.message)
+
+        elif data == "premium":
+            await show_premium(call.message, call.from_user.id)
+
+        elif data == "premium_request":
+            await notify_admin_about_premium_request(bot, call.message, call.from_user)
 
         elif data == "cancel":
             await cancel_action(call.message, state)
@@ -902,7 +1152,7 @@ Mistakes:
         elif data.startswith("mode_"):
             mode = data.replace("mode_", "")
             if MODES[mode]["premium"] and not is_premium(call.from_user.id):
-                await call.message.answer("🔒 Этот режим доступен только в Premium.")
+                await call.message.answer("🔒 Этот режим доступен только в Premium.", reply_markup=premium_kb())
                 return
 
             if mode == "roadmap":
@@ -965,6 +1215,10 @@ Mistakes:
 
 Не давай ответы заранее.
 """
+            if not await ensure_ai_quota(call.message, call.from_user.id):
+                await state.clear()
+                return
+
             answer = ask_ai(practice_prompt, level, "practice")
             await send_practice_task(call.message, state, answer, topic, level, "practice")
 
@@ -987,6 +1241,10 @@ Mistakes:
         data = await state.get_data()
         mode = data.get("mode", "explain")
         level = level_label(get_level(message.from_user.id))
+        if not await ensure_ai_quota(message, message.from_user.id):
+            await state.clear()
+            return
+
         msg = await message.answer("🤖 Думаю...")
         asyncio.create_task(delete_later(msg, 5))
         prompt = make_user_prompt(topic, mode, level)
