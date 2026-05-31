@@ -21,7 +21,14 @@ from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
 from motivation import get_phrase
-from prompts import make_roadmap_check_prompt, make_roadmap_lesson_prompt, make_user_prompt, make_vocab_words_prompt
+from prompts import (
+    make_practice_check_prompt,
+    make_practice_task_prompt,
+    make_roadmap_check_prompt,
+    make_roadmap_lesson_prompt,
+    make_user_prompt,
+    make_vocab_words_prompt,
+)
 from roadmap import get_current_topic, update_progress
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
@@ -963,26 +970,7 @@ async def main():
             )
             return
 
-        prompt = f"""
-Ты проверяешь ответы ученика по английскому.
-
-Тема: {topic}
-Уровень: {level}
-Тип задания: {mode}
-
-Задание:
-{task}
-
-Ответ ученика:
-{user_answer}
-
-Проверь ответ.
-Формат:
-1. Что верно
-2. Что исправить
-3. Правильный вариант, если есть ошибка
-4. Короткий совет
-"""
+        prompt = make_practice_check_prompt(topic, level, task, user_answer, mode)
         if not await ensure_ai_quota(message, message.from_user.id):
             await state.clear()
             return
@@ -1472,19 +1460,7 @@ Mistakes:
                 await call.message.answer("Тема потерялась. Попробуйте снова.", reply_markup=main_menu(call.from_user.id))
                 return
 
-            practice_prompt = f"""
-Ты даешь задания по английскому.
-
-Тема: {topic}
-Уровень: {level}
-
-Сделай ровно 3 задания:
-1. Translate
-2. Make a sentence
-3. Answer the question
-
-Не давай ответы заранее.
-"""
+            practice_prompt = make_practice_task_prompt(topic, level)
             if not await ensure_ai_quota(call.message, call.from_user.id):
                 await state.clear()
                 return
