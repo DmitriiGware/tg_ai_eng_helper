@@ -41,6 +41,8 @@ DEFAULT_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 RECENT_VOCAB_HISTORY_LIMIT = 80
 FREE_DAILY_AI_LIMIT = 5
+FREE_MAX_WORDS_PER_DAY = 3
+PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 
 LEVELS = [
@@ -133,6 +135,30 @@ def get_ai_usage_text(user_id: int) -> str:
 
     remaining = max(FREE_DAILY_AI_LIMIT - count, 0)
     return f"{remaining}/{FREE_DAILY_AI_LIMIT} AI-запросов сегодня"
+
+
+def get_free_plan_text() -> str:
+    return (
+        "Free:\n"
+        f"• {FREE_DAILY_AI_LIMIT} AI-запросов в день\n"
+        "• Explain, Summary, Quiz, Practice\n"
+        "• Roadmap доступен, но тратит AI-запросы\n"
+        f"• Vocabulary до {FREE_MAX_WORDS_PER_DAY} слов в день\n"
+        "• Глоссарий, профиль, уровень и помощь без лимита\n"
+        "• Chat и Voice недоступны"
+    )
+
+
+def get_premium_plan_text() -> str:
+    return (
+        "Premium:\n"
+        "• AI-запросы без дневного лимита\n"
+        "• Explain, Summary, Quiz, Practice без лимита\n"
+        "• Roadmap без лимита\n"
+        f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
+        "• Chat и Voice\n"
+        "• приоритет для новых функций"
+    )
 
 
 def consume_ai_request(user_id: int) -> tuple[bool, int]:
@@ -276,7 +302,8 @@ def get_yookassa_payment_status_sync(payment_id: str) -> str:
 def premium_limit_text() -> str:
     return (
         "Дневной лимит Free закончился.\n\n"
-        "В Premium доступны безлимитные AI-объяснения, проверка ответов, roadmap, chat и voice."
+        f"{get_free_plan_text()}\n\n"
+        f"{get_premium_plan_text()}"
     )
 
 
@@ -324,6 +351,7 @@ def build_main_menu_text(user_id: int) -> str:
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
         f"• Roadmap: тема {roadmap_step}\n\n"
+        f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
         f"💡 {get_phrase()}"
     )
 
@@ -332,9 +360,9 @@ def build_learning_menu_text() -> str:
     return (
         "📘 Обучение\n"
         "Выберите, как хотите пройти материал.\n\n"
-        "• Explain — быстро разобрать тему\n"
-        "• Summary — получить короткий конспект\n"
-        "• Vocabulary — ежедневные слова"
+        "• Explain — 1 AI-запрос\n"
+        "• Summary — 1 AI-запрос\n"
+        f"• Vocabulary — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
     )
 
 
@@ -342,8 +370,8 @@ def build_practice_menu_text() -> str:
     return (
         "🧠 Практика\n"
         "Блок для закрепления и ответов.\n\n"
-        "• Quiz — мини-тест по теме\n"
-        "• Practice — задания с проверкой"
+        "• Quiz — 1 AI-запрос на задание + 1 на проверку\n"
+        "• Practice — 1 AI-запрос на задание + 1 на проверку"
     )
 
 
@@ -351,9 +379,9 @@ def build_advanced_menu_text() -> str:
     return (
         "🚀 Advanced\n"
         "Более глубокие режимы обучения.\n\n"
-        "• Chat — свободная тренировка\n"
-        "• Road map — пошаговый путь по темам\n"
-        "• Voice — голосовой формат"
+        "• Road map — доступен в Free, тратит AI-запросы\n"
+        "• Chat — только Premium\n"
+        "• Voice — только Premium"
     )
 
 
@@ -371,6 +399,7 @@ def build_settings_menu_text(user_id: int) -> str:
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n\n"
+        f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
         "Здесь можно поменять уровень и открыть справку."
     )
 
@@ -384,12 +413,8 @@ def build_premium_text(user_id: int) -> str:
         "💎 Premium\n"
         f"Статус: {status}\n"
         f"AI сегодня: {ai_usage}\n\n"
-        "Что входит:\n"
-        "• безлимитные AI-объяснения и конспекты\n"
-        "• проверка практики без дневного лимита\n"
-        "• roadmap без ограничений\n"
-        "• доступ к Chat и Voice, когда они подключены\n"
-        "• приоритет для новых функций\n\n"
+        f"{get_free_plan_text()}\n\n"
+        f"{get_premium_plan_text()}\n\n"
         f"Telegram Stars: {PREMIUM_STARS_PRICE} ⭐\n"
         f"Карта: {yookassa_text}\n"
         f"Оплата: {PREMIUM_PAYMENT_TEXT}\n\n"
@@ -521,13 +546,15 @@ def level_question_kb(question: dict):
     ])
 
 
-def vocab_count_kb(current_value: int | None = None):
+def vocab_count_kb(user_id: int, current_value: int | None = None):
     rows = []
     row = []
+    max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
 
     for value in range(3, 11):
         prefix = "✅ " if current_value == value else ""
-        row.append(InlineKeyboardButton(text=f"{prefix}{value}", callback_data=f"set_vocab_count:{value}"))
+        suffix = "" if value <= max_words else " 🔒"
+        row.append(InlineKeyboardButton(text=f"{prefix}{value}{suffix}", callback_data=f"set_vocab_count:{value}"))
         if len(row) == 4:
             rows.append(row)
             row = []
@@ -805,11 +832,14 @@ async def main():
 
     async def show_vocab_settings(message: Message, user_id: int):
         current_value = get_words_per_day(user_id) or DEFAULT_WORDS_PER_DAY
+        max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
         await message.answer(
             "✨ Настройка словаря\n"
             "Выберите, сколько новых слов хотите получать в день.\n"
-            f"Рекомендуемый старт: {DEFAULT_WORDS_PER_DAY}. Самый удобный темп — 5-7 слов в день.",
-            reply_markup=vocab_count_kb(current_value),
+            f"Free: до {FREE_MAX_WORDS_PER_DAY} слов в день.\n"
+            f"Premium: до {PREMIUM_MAX_WORDS_PER_DAY} слов в день.\n"
+            f"Ваш максимум сейчас: {max_words}.",
+            reply_markup=vocab_count_kb(user_id, current_value),
         )
 
     async def send_vocab_words(bot: Bot, user_id: int, force: bool = False):
@@ -1361,6 +1391,13 @@ Mistakes:
             value = int(data.split(":", 1)[1])
             if value < 3 or value > 10:
                 await call.answer("Выберите число от 3 до 10.")
+                return
+
+            if not is_premium(call.from_user.id) and value > FREE_MAX_WORDS_PER_DAY:
+                await call.message.answer(
+                    f"🔒 В Free доступно до {FREE_MAX_WORDS_PER_DAY} слов в день. Больше — в Premium.",
+                    reply_markup=premium_kb(),
+                )
                 return
 
             db = SessionLocal()
