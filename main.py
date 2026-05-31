@@ -29,7 +29,7 @@ from prompts import (
     make_user_prompt,
     make_vocab_words_prompt,
 )
-from roadmap import get_current_topic, update_progress
+from roadmap import ROADMAP, get_current_topic, update_progress
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -333,6 +333,82 @@ def get_current_topic_number(user_id: int) -> int:
     return user.current_topic_index + 1
 
 
+def format_topic_title(topic: str) -> str:
+    return topic.replace(" and ", " & ").capitalize()
+
+
+def progress_bar(done: int, total: int, width: int = 10) -> str:
+    if total <= 0:
+        return "□" * width
+    filled = round((done / total) * width)
+    return "■" * filled + "□" * (width - filled)
+
+
+def get_roadmap_snapshot(user: User) -> dict:
+    level = normalize_level(user.level)
+    topics = ROADMAP.get(level, [])
+    total = len(topics)
+    raw_index = user.current_topic_index or 0
+    current_index = max(raw_index, 0)
+    done = min(current_index, total)
+    current_topic = topics[current_index] if current_index < total else None
+    next_topics = topics[current_index + 1:current_index + 6] if current_topic else []
+    percent = round((done / total) * 100) if total else 0
+
+    return {
+        "level": level,
+        "label": level_label(level),
+        "topics": topics,
+        "total": total,
+        "done": done,
+        "current_index": current_index,
+        "current_topic": current_topic,
+        "next_topics": next_topics,
+        "percent": percent,
+    }
+
+
+def build_roadmap_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if not user:
+        return "Пользователь не найден. Нажмите /start."
+
+    snapshot = get_roadmap_snapshot(user)
+    total = snapshot["total"]
+    done = snapshot["done"]
+
+    if not snapshot["current_topic"]:
+        return (
+            "🗺 План обучения\n\n"
+            f"Уровень: {snapshot['label']}\n"
+            f"Прогресс: {done}/{total} тем • 100%\n"
+            f"{progress_bar(done, total)}\n\n"
+            "✅ План уровня завершён. Можно сменить уровень в профиле и продолжить."
+        )
+
+    next_lines = "\n".join(
+        f"{snapshot['current_index'] + offset + 1}. {format_topic_title(topic)}"
+        for offset, topic in enumerate(snapshot["next_topics"], start=1)
+    )
+    if not next_lines:
+        next_lines = "Это последняя тема уровня."
+
+    return (
+        "🗺 План обучения\n\n"
+        f"Уровень: {snapshot['label']}\n"
+        f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
+        f"{progress_bar(done, total)}\n\n"
+        "Текущий шаг:\n"
+        f"{snapshot['current_index'] + 1}. {format_topic_title(snapshot['current_topic'])}\n\n"
+        "Следующие темы:\n"
+        f"{next_lines}\n\n"
+        "Как это работает:\n"
+        "1. Нажмите «Начать урок».\n"
+        "2. Ответьте на задание.\n"
+        "3. Если ответ верный, бот откроет следующую тему."
+    )
+
+
 def menu_back_label() -> str:
     return "◀️ Главное меню"
 
@@ -561,6 +637,24 @@ def premium_kb():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def roadmap_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Начать урок", callback_data="roadmap_start")],
+        [InlineKeyboardButton(text="🔄 Сбросить прогресс", callback_data="roadmap_reset_confirm")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def roadmap_reset_confirm_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, сбросить", callback_data="roadmap_reset"),
+            InlineKeyboardButton(text="✖️ Нет", callback_data="mode_roadmap"),
+        ],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
 def yookassa_payment_kb(confirmation_url: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Перейти к оплате", url=confirmation_url)],
@@ -725,6 +819,26 @@ async def main():
 
     async def show_premium(message: Message, user_id: int):
         await message.answer(build_premium_text(user_id), reply_markup=premium_kb())
+
+    async def show_roadmap(message: Message, user_id: int):
+        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+
+    async def reset_roadmap_progress(message: Message, user_id: int):
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user:
+                await message.answer("Пользователь не найден. Нажмите /start.")
+                return
+
+            user.current_topic_index = 0
+            user.last_result = ""
+            db.commit()
+        finally:
+            db.close()
+
+        await message.answer("🔄 Прогресс плана обучения сброшен.", reply_markup=roadmap_kb())
+        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
 
     async def send_stars_invoice(bot: Bot, user_id: int):
         payload = f"premium_stars:{user_id}:{uuid4().hex[:16]}"
@@ -1059,7 +1173,7 @@ async def main():
 
         if not topic:
             await state.clear()
-            await message.answer("✅ Roadmap completed.", reply_markup=main_menu(user_id))
+            await message.answer("✅ План обучения завершён.", reply_markup=roadmap_kb())
             return
 
         if not await ensure_ai_quota(message, user_id):
@@ -1069,9 +1183,9 @@ async def main():
         lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
         await state.update_data(roadmap_topic=topic, roadmap_lesson=lesson)
         await state.set_state(StudyFlow.waiting_roadmap_answer)
-        await message.answer(f"🗺 Roadmap topic: {topic}")
+        await message.answer(f"🗺 Урок плана: {format_topic_title(topic)}")
         await message.answer(lesson)
-        await message.answer("✍️ Отправьте ответ одним сообщением.", reply_markup=cancel_kb())
+        await message.answer("✍️ Отправьте ответ на задание одним сообщением.", reply_markup=cancel_kb())
 
     async def check_roadmap_answer(message: Message, state: FSMContext, user_answer: str):
         data = await state.get_data()
@@ -1112,7 +1226,7 @@ async def main():
             db.close()
 
         await message.answer(review)
-        await send_roadmap_lesson(message, state, message.from_user.id)
+        await message.answer(build_roadmap_text(message.from_user.id), reply_markup=roadmap_kb())
 
     async def explain_level_errors(wrong_answers: list[dict], target_level: str) -> str:
         details = "\n".join(
@@ -1387,6 +1501,19 @@ Mistakes:
         elif data == "premium_request":
             await notify_admin_about_premium_request(bot, call.message, call.from_user)
 
+        elif data == "roadmap_start":
+            await send_roadmap_lesson(call.message, state, call.from_user.id)
+
+        elif data == "roadmap_reset_confirm":
+            await call.message.answer(
+                "Сбросить план обучения на первую тему текущего уровня?",
+                reply_markup=roadmap_reset_confirm_kb(),
+            )
+
+        elif data == "roadmap_reset":
+            await state.clear()
+            await reset_roadmap_progress(call.message, call.from_user.id)
+
         elif data == "cancel":
             await cancel_action(call.message, state, call.from_user.id)
 
@@ -1478,7 +1605,7 @@ Mistakes:
                 return
 
             if mode == "roadmap":
-                await send_roadmap_lesson(call.message, state, call.from_user.id)
+                await show_roadmap(call.message, call.from_user.id)
                 return
 
             await state.update_data(mode=mode)
