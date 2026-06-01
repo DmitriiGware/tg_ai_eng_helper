@@ -605,7 +605,7 @@ def build_roadmap_text(user_id: int) -> str:
             "Формат урока:\n"
             "1. Теория 1 — смысл\n"
             "2. Теория 2 — частые ошибки\n"
-            "3. Практика — 5 заданий"
+            "3. Тест — 1-2 вопроса с вариантами ответа"
         )
 
     next_lines = "\n".join(
@@ -627,8 +627,39 @@ def build_roadmap_text(user_id: int) -> str:
         "Как это работает:\n"
         "1. Теория 1 — смысл темы.\n"
         "2. Теория 2 — как использовать и где ошибаются.\n"
-        "3. Практика — 5 заданий.\n"
+        "3. Тест — 1-2 вопроса с вариантами ответа.\n"
         f"4. Каждые {ROADMAP_REVIEW_INTERVAL} темы — повторение."
+    )
+
+
+def build_roadmap_topics_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if not user:
+        return "Пользователь не найден. Нажмите /start."
+
+    snapshot = get_roadmap_snapshot(user)
+    topics = snapshot["topics"]
+    done = snapshot["done"]
+    current_index = snapshot["current_index"]
+
+    if not topics:
+        return f"🧭 Темы уровня {snapshot['label']}\n\nДля этого уровня пока нет списка тем."
+
+    lines = []
+    for index, topic in enumerate(topics):
+        if index < done:
+            marker = "✅"
+        elif index == current_index and snapshot["current_topic"]:
+            marker = "▶️"
+        else:
+            marker = "▫️"
+        lines.append(f"{marker} {index + 1}. {format_topic_title(topic)}")
+
+    return (
+        f"🧭 Темы уровня {snapshot['label']}\n\n"
+        f"Прогресс: {done}/{snapshot['total']} тем • {snapshot['percent']}%\n"
+        f"{progress_bar(done, snapshot['total'])}\n\n"
+        + "\n".join(lines)
     )
 
 
@@ -863,6 +894,7 @@ def premium_kb():
 def roadmap_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Начать урок", callback_data="roadmap_start")],
+        [InlineKeyboardButton(text="🧭 Список тем", callback_data="roadmap_topics")],
         [InlineKeyboardButton(text="🔄 Сбросить прогресс", callback_data="roadmap_reset_confirm")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -1054,6 +1086,9 @@ async def main():
 
     async def show_roadmap(message: Message, user_id: int):
         await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+
+    async def show_roadmap_topics(message: Message, user_id: int):
+        await message.answer(build_roadmap_topics_text(user_id), reply_markup=roadmap_kb())
 
     async def reset_roadmap_progress(message: Message, user_id: int):
         db = SessionLocal()
@@ -1864,6 +1899,9 @@ Mistakes:
 
         elif data == "roadmap_start":
             await send_roadmap_lesson(call.message, state, call.from_user.id)
+
+        elif data == "roadmap_topics":
+            await show_roadmap_topics(call.message, call.from_user.id)
 
         elif data.startswith("roadmap_theory:"):
             theory_index = int(data.split(":", 1)[1])
