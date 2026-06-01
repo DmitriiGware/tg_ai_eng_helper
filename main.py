@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from ai_client import ask_ai
 from database.db import SessionLocal, engine, ensure_user_progress_columns
-from database.models import Base, User, VocabWord
+from database.models import Base, RoadmapLessonCache, User, VocabWord
 from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
@@ -93,6 +93,10 @@ def today_key() -> str:
     return datetime.now().date().isoformat()
 
 
+def now_key() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
 def is_admin(user_id: int | None) -> bool:
     if user_id is None or not ADMIN_TELEGRAM_ID:
         return False
@@ -150,7 +154,7 @@ def get_free_plan_text() -> str:
         "Free:\n"
         f"• {FREE_DAILY_AI_LIMIT} AI-запросов в день\n"
         "• Explain, Summary, Quiz, Practice\n"
-        "• Roadmap доступен, но тратит AI-запросы\n"
+        "• Roadmap: готовые модули без расхода AI-запросов, новые темы тратят запрос\n"
         f"• Vocabulary до {FREE_MAX_WORDS_PER_DAY} слов в день\n"
         "• Глоссарий, профиль, уровень и помощь без лимита\n"
         "• Chat и Voice недоступны"
@@ -483,6 +487,59 @@ def build_roadmap_quiz_summary(questions: list[dict], answers: list[int]) -> tup
     title = f"✅ Тест пройден: {score}/{total}" if passed else f"Нужно повторить: {score}/{total}"
     summary = title + "\n\n" + "\n\n".join(lines)
     return summary, passed
+
+
+def build_roadmap_cache_key(level: str, lesson_type: str, topic: str, simplify: bool) -> str:
+    normalized_topic = re.sub(r"\s+", " ", (topic or "").strip().lower())
+    return f"{normalize_level(level)}:{lesson_type}:{int(simplify)}:{normalized_topic}"
+
+
+def get_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool) -> str | None:
+    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
+    db = SessionLocal()
+    try:
+        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
+        if not cached:
+            return None
+
+        cached.use_count = (cached.use_count or 0) + 1
+        cached.last_used_at = now_key()
+        content = cached.content
+        db.commit()
+        return content
+    finally:
+        db.close()
+
+
+def save_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool, content: str) -> None:
+    if not content:
+        return
+
+    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
+    db = SessionLocal()
+    try:
+        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
+        if cached:
+            cached.content = content
+            cached.last_used_at = now_key()
+            db.commit()
+            return
+
+        now = now_key()
+        db.add(RoadmapLessonCache(
+            cache_key=cache_key,
+            level=normalize_level(level),
+            topic=topic,
+            lesson_type=lesson_type,
+            simplify=1 if simplify else 0,
+            content=content,
+            created_at=now,
+            last_used_at=now,
+            use_count=0,
+        ))
+        db.commit()
+    finally:
+        db.close()
 
 
 def get_roadmap_snapshot(user: User) -> dict:
@@ -988,7 +1045,7 @@ async def main():
     async def change_level_action(message: Message, user_id: int):
         current = get_level(user_id)
         await message.answer(
-            f"🎯 Уровень\n\nСейчас: {level_label(current)}\n\nВыберите новый уровень. После выбора бот предложит короткий тест.",
+            f"🎯 Уровень\n\nСейчас: {level_label(current)}\n\nA1 включается сразу. Для уровней выше бот предложит короткий тест.",
             reply_markup=level_kb(current),
         )
 
@@ -1340,7 +1397,8 @@ async def main():
             review_due = is_roadmap_review_due(user)
             review_topics = get_roadmap_review_topics(user) if review_due else []
             topic = "review: " + ", ".join(review_topics) if review_due else get_current_topic(user)
-            level = level_label(user.level)
+            level_code = normalize_level(user.level)
+            level = level_label(level_code)
             simplify = user.last_result in {"wrong_twice", "review_wrong"}
         finally:
             db.close()
@@ -1350,18 +1408,27 @@ async def main():
             await message.answer("✅ План обучения завершён.", reply_markup=roadmap_kb())
             return
 
-        if not await ensure_ai_quota(message, user_id):
-            await state.clear()
-            return
-
         if review_due:
-            lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
             roadmap_kind = "review"
             title = "Повторение: " + ", ".join(format_topic_title(topic) for topic in review_topics)
         else:
-            lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
             roadmap_kind = "topic"
             title = format_topic_title(topic)
+
+        cached_lesson = get_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify)
+        lesson = cached_lesson
+        generated_new_lesson = False
+
+        if not lesson:
+            if not await ensure_ai_quota(message, user_id):
+                await state.clear()
+                return
+
+            if review_due:
+                lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
+            else:
+                lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
+            generated_new_lesson = True
 
         sections = split_roadmap_lesson(lesson)
         theory_pages = [
@@ -1370,6 +1437,24 @@ async def main():
             if page
         ] or [lesson]
         quiz_questions = parse_roadmap_quiz(sections["quiz"])
+        if not quiz_questions and cached_lesson:
+            if not await ensure_ai_quota(message, user_id):
+                await state.clear()
+                return
+
+            if review_due:
+                lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
+            else:
+                lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
+            generated_new_lesson = True
+            sections = split_roadmap_lesson(lesson)
+            theory_pages = [
+                page
+                for page in [sections["theory_1"], sections["theory_2"], sections["theory_3"]]
+                if page
+            ] or [lesson]
+            quiz_questions = parse_roadmap_quiz(sections["quiz"])
+
         if not quiz_questions:
             await state.clear()
             await message.answer(
@@ -1377,6 +1462,9 @@ async def main():
                 reply_markup=roadmap_kb(),
             )
             return
+
+        if generated_new_lesson:
+            save_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify, lesson)
 
         await state.update_data(
             roadmap_topic=topic,
@@ -1542,6 +1630,7 @@ Mistakes:
                 if user:
                     user.level = target_level
                     user.current_topic_index = 0
+                    user.roadmap_review_index = 0
                     user.last_result = ""
                     db.commit()
             finally:
@@ -1944,6 +2033,29 @@ Mistakes:
 
         elif data.startswith("set_level:"):
             level = normalize_level(data.split(":", 1)[1])
+            if level == "A1":
+                await state.clear()
+                db = SessionLocal()
+                try:
+                    user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                    if not user:
+                        await call.message.answer("User not found. Please use /start first.")
+                        return
+
+                    user.level = level
+                    user.current_topic_index = 0
+                    user.roadmap_review_index = 0
+                    user.last_result = ""
+                    db.commit()
+                finally:
+                    db.close()
+
+                await call.message.edit_text(
+                    f"✅ Уровень изменен на {level_label(level)}.\nПлан обучения начнётся с первой темы.",
+                    reply_markup=main_menu(call.from_user.id),
+                )
+                return
+
             await state.set_state(LevelChangeFlow.confirming)
             await state.update_data(pending_level=level)
             await call.message.edit_text(

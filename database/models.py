@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Text
 from database.db import Base
 
 class User(Base):
@@ -34,3 +34,18 @@ class VocabWord(Base):
     example = Column(String)
     example_translation = Column(String)
     sent_date = Column(String)
+
+
+class RoadmapLessonCache(Base):
+    __tablename__ = "roadmap_lesson_cache"
+
+    id = Column(Integer, primary_key=True)
+    cache_key = Column(String, unique=True, index=True)
+    level = Column(String, index=True)
+    topic = Column(String, index=True)
+    lesson_type = Column(String, default="topic")
+    simplify = Column(Integer, default=0)
+    content = Column(Text)
+    created_at = Column(String, default="")
+    last_used_at = Column(String, default="")
+    use_count = Column(Integer, default=0)
