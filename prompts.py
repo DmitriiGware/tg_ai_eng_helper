@@ -172,15 +172,16 @@ def make_roadmap_lesson_prompt(topic: str, level: str, simplify: bool = False) -
 Объясни тему намного проще обычного.
 - Используй короткие предложения
 - Используй совсем простые примеры
-- Практику сделай легче обычного
+- Тест сделай легче обычного
 """
 
     return f"""
 Тема: {topic}
 Уровень ученика: {level}
 
-Сделай урок для плана обучения. Урок должен состоять из двух последовательных блоков теории и практики.
+Сделай модуль для плана обучения. Модуль должен состоять из 2-3 последовательных страниц теории и короткого теста в конце.
 Теория должна быть чуть подробнее обычной: не сухое определение, а понятное объяснение с контекстом, примерами и типичными ошибками.
+Не проси ученика писать целые предложения в этом модуле. Проверка должна быть через варианты ответа.
 
 Верни ответ строго в таком формате:
 
@@ -196,21 +197,39 @@ def make_roadmap_lesson_prompt(topic: str, level: str, simplify: bool = False) -
 Дай 2 частые ошибки и правильные варианты.
 Добавь 1 мини-подсказку, как самому проверить свой ответ.
 
-===PRACTICE===
-Сделай 5 заданий:
-1. Translate into English
-2. Fill the gap или Correct the mistake
-3. Answer the question
-4. Make a sentence
-5. Correct the mistake или Choose the best option
+===THEORY_3===
+Добавь этот блок только если тема сложная или важная.
+Дай ещё 2-3 примера и короткое сравнение с похожей темой.
+
+===QUIZ===
+Сделай 1-2 вопроса на понимание темы с вариантами ответа.
+Формат каждого вопроса строго такой:
+Q1: question text
+A) option
+B) option
+C) option
+D) option
+ANSWER: B
+EXPLANATION: коротко объясни на русском, почему это правильный ответ
+
+Q2: question text
+A) option
+B) option
+C) option
+D) option
+ANSWER: A
+EXPLANATION: коротко объясни на русском, почему это правильный ответ
 
 Правила:
 - Пиши объяснение на русском
-- Не давай правильные ответы заранее
-- Практика должна проверять именно эту тему
-- Ученик должен мочь ответить одним сообщением
+- Не давай правильные ответы в теории
+- Тест должен проверять именно эту тему
+- Не делай задания на перевод целого предложения
 - Для A1-A2 используй очень простые предложения
 - Каждый блок теории должен быть информативным, но не длиннее 160-220 слов
+- В QUIZ обязательно должен быть хотя бы Q1
+- Вариантов ответа всегда 4
+- ANSWER должен быть только буквой A, B, C или D
 
 {simplify_block}
 """
@@ -230,8 +249,9 @@ def make_roadmap_review_prompt(topics: list[str], level: str, simplify: bool = F
 Темы для повторения: {topics_text}
 Уровень ученика: {level}
 
-Сделай урок-повторение для плана обучения. Нужно освежить уже изученные темы и закрепить их практикой.
+Сделай модуль-повторение для плана обучения. Нужно освежить уже изученные темы и закрепить их коротким тестом в конце.
 Теория должна быть полезной: напомни правила, покажи различия между темами и дай понятные ориентиры перед заданиями.
+Не проси ученика писать целые предложения в этом модуле. Проверка должна быть через варианты ответа.
 
 Верни ответ строго в таком формате:
 
@@ -245,45 +265,39 @@ def make_roadmap_review_prompt(topics: list[str], level: str, simplify: bool = F
 Дай 2-3 частые ошибки и правильные варианты.
 Добавь 1 мини-подсказку, как самому проверить ответ перед отправкой.
 
-===PRACTICE===
-Сделай 5 заданий на повторение:
-1. Translate into English
-2. Fill the gap
-3. Correct the mistake
-4. Answer the question
-5. Make a sentence
+===THEORY_3===
+Добавь этот блок только если повторение получилось плотным.
+Покажи короткое сравнение тем и 2-3 дополнительных примера.
+
+===QUIZ===
+Сделай 1-2 вопроса на понимание повторяемых тем с вариантами ответа.
+Формат каждого вопроса строго такой:
+Q1: question text
+A) option
+B) option
+C) option
+D) option
+ANSWER: B
+EXPLANATION: коротко объясни на русском, почему это правильный ответ
+
+Q2: question text
+A) option
+B) option
+C) option
+D) option
+ANSWER: A
+EXPLANATION: коротко объясни на русском, почему это правильный ответ
 
 Правила:
-- Не давай ответы заранее
+- Не давай ответы заранее в теории
 - Проверяй все перечисленные темы, а не только одну
-- Ученик должен мочь ответить одним сообщением
+- Не делай задания на перевод целого предложения
 - Каждый блок теории должен быть информативным, но не длиннее 160-220 слов
+- В QUIZ обязательно должен быть хотя бы Q1
+- Вариантов ответа всегда 4
+- ANSWER должен быть только буквой A, B, C или D
 
 {simplify_block}
-"""
-
-
-def make_roadmap_check_prompt(topic: str, level: str, lesson: str, user_answer: str) -> str:
-    return f"""
-You are checking a student's English answer for a roadmap lesson.
-
-Topic: {topic}
-Level: {level}
-
-Lesson and task:
-{lesson}
-
-Student answer:
-{user_answer}
-
-Return strictly in this format:
-RESULT: correct or incorrect
-FEEDBACK:
-- Give a short Russian summary for each task.
-- Mark each task as correct, almost correct, or incorrect.
-- If there is a mistake, give the corrected English version and a short Russian explanation.
-- Finish with "Итог:" and name the main thing the student should repeat.
-- If most answers are correct and mistakes are minor, RESULT should be correct.
 """
 
 

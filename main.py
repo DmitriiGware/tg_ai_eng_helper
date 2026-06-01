@@ -24,7 +24,6 @@ from motivation import get_phrase
 from prompts import (
     make_practice_check_prompt,
     make_practice_task_prompt,
-    make_roadmap_check_prompt,
     make_roadmap_lesson_prompt,
     make_roadmap_review_prompt,
     make_user_prompt,
@@ -370,7 +369,7 @@ def get_roadmap_review_topics(user: User) -> list[str]:
 
 
 def split_roadmap_lesson(text: str) -> dict:
-    sections = {"theory_1": "", "theory_2": "", "practice": ""}
+    sections = {"theory_1": "", "theory_2": "", "theory_3": "", "quiz": ""}
     current = None
 
     for raw_line in (text or "").splitlines():
@@ -382,8 +381,11 @@ def split_roadmap_lesson(text: str) -> dict:
         if marker == "===THEORY_2===":
             current = "theory_2"
             continue
-        if marker == "===PRACTICE===":
-            current = "practice"
+        if marker == "===THEORY_3===":
+            current = "theory_3"
+            continue
+        if marker in {"===QUIZ===", "===PRACTICE==="}:
+            current = "quiz"
             continue
         if current:
             sections[current] += raw_line + "\n"
@@ -397,30 +399,90 @@ def split_roadmap_lesson(text: str) -> dict:
     return sections
 
 
-def split_practice_questions(text: str) -> list[str]:
-    matches = re.findall(
-        r"(?ms)^\s*\d{1,2}[\).:-]\s+(.*?)(?=^\s*\d{1,2}[\).:-]\s+|\Z)",
-        text or "",
+def parse_roadmap_quiz(text: str) -> list[dict]:
+    questions = []
+    for block in re.findall(r"(?ms)^\s*Q\d+:\s*(.*?)(?=^\s*Q\d+:\s*|\Z)", text or ""):
+        first_option = re.search(r"(?m)^\s*A[\).]\s+", block)
+        if not first_option:
+            continue
+
+        question_text = block[:first_option.start()].strip()
+        options = []
+        option_labels = []
+        for label, option in re.findall(
+            r"(?ms)^\s*([A-D])[\).]\s*(.*?)(?=^\s*[A-D][\).]\s+|^\s*ANSWER:\s*|\Z)",
+            block,
+        ):
+            option_labels.append(label.upper())
+            option = re.sub(r"(?mis)\n\s*EXPLANATION:\s*.*$", "", option).strip()
+            options.append(option)
+
+        answer_match = re.search(r"(?mi)^\s*ANSWER:\s*([A-D])\s*$", block)
+        explanation_match = re.search(r"(?mis)^\s*EXPLANATION:\s*(.*?)\s*$", block)
+
+        if not question_text or len(options) < 2 or not answer_match:
+            continue
+
+        correct_label = answer_match.group(1).upper()
+        if correct_label not in option_labels:
+            continue
+
+        questions.append({
+            "question": question_text,
+            "options": options,
+            "correct_index": option_labels.index(correct_label),
+            "explanation": explanation_match.group(1).strip() if explanation_match else "",
+        })
+
+    return questions[:2]
+
+
+def roadmap_quiz_kb(question: dict):
+    labels = ["A", "B", "C", "D"]
+    rows = [
+        [InlineKeyboardButton(text=labels[index], callback_data=f"roadmap_quiz_answer:{index}")]
+        for index, option in enumerate(question["options"])
+    ]
+    rows.append([InlineKeyboardButton(text=cancel_label(), callback_data="cancel")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_roadmap_quiz_question(question: dict, index: int, total: int) -> str:
+    labels = ["A", "B", "C", "D"]
+    options = "\n".join(
+        f"{labels[option_index]}) {option}"
+        for option_index, option in enumerate(question["options"])
     )
-    questions = [match.strip() for match in matches if match.strip()]
-    if questions:
-        return questions[:5]
-
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    return lines[:5] if lines else [text.strip()]
+    return f"Тест {index + 1}/{total}\n\n{question['question']}\n\n{options}"
 
 
-def format_practice_question(question: str, index: int, total: int) -> str:
-    return f"Практика {index + 1}/{total}\n\n{question}"
+def build_roadmap_quiz_summary(questions: list[dict], answers: list[int]) -> tuple[str, bool]:
+    total = len(questions)
+    score = 0
+    lines = []
 
+    for index, question in enumerate(questions):
+        selected_index = answers[index] if index < len(answers) else -1
+        correct_index = question["correct_index"]
+        is_correct = selected_index == correct_index
+        if is_correct:
+            score += 1
 
-def format_roadmap_answers(answers: list[dict]) -> str:
-    parts = []
-    for index, item in enumerate(answers, start=1):
-        question = item.get("question", "").strip()
-        answer = item.get("answer", "").strip()
-        parts.append(f"{index}. Task: {question}\nStudent answer: {answer}")
-    return "\n\n".join(parts)
+        selected = question["options"][selected_index] if 0 <= selected_index < len(question["options"]) else "нет ответа"
+        correct = question["options"][correct_index]
+        status = "✅" if is_correct else "❌"
+        lines.append(
+            f"{status} {index + 1}. {question['question']}\n"
+            f"Ваш ответ: {selected}\n"
+            f"Правильно: {correct}\n"
+            f"{question.get('explanation', '').strip()}"
+        )
+
+    passed = total > 0 and score == total
+    title = f"✅ Тест пройден: {score}/{total}" if passed else f"Нужно повторить: {score}/{total}"
+    summary = title + "\n\n" + "\n\n".join(lines)
+    return summary, passed
 
 
 def get_roadmap_snapshot(user: User) -> dict:
@@ -1266,10 +1328,6 @@ async def main():
         await state.clear()
         await message.answer(feedback, reply_markup=main_menu(message.from_user.id))
 
-    def parse_roadmap_result(answer: str) -> bool:
-        first_line = (answer or "").splitlines()[0].strip().lower()
-        return "result: correct" in first_line
-
     async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int):
         db = SessionLocal()
         try:
@@ -1306,106 +1364,103 @@ async def main():
             title = format_topic_title(topic)
 
         sections = split_roadmap_lesson(lesson)
-        theory_1 = sections["theory_1"] or lesson
-        theory_2 = sections["theory_2"]
-        practice_task = sections["practice"] or lesson
-        await state.update_data(
-            roadmap_topic=topic,
-            roadmap_lesson=lesson,
-            roadmap_theory_1=theory_1,
-            roadmap_theory_2=theory_2,
-            roadmap_practice_task=practice_task,
-            roadmap_kind=roadmap_kind,
-            roadmap_lesson_step="theory_1",
-        )
-        await state.set_state(StudyFlow.viewing_roadmap_lesson)
-        await message.answer(f"🗺 Урок плана: {title}")
-        next_text = "➡️ Дальше" if theory_2 else "🧠 К практике"
-        next_callback = "roadmap_theory_2" if theory_2 else "roadmap_practice"
-        theory_title = "Теория 1/2" if theory_2 else "Теория"
-        await message.answer(
-            f"{theory_title}\n\n{theory_1}",
-            reply_markup=roadmap_lesson_step_kb(next_text, next_callback),
-        )
-
-    async def send_roadmap_theory_2(message: Message, state: FSMContext, user_id: int):
-        data = await state.get_data()
-        theory_2 = data.get("roadmap_theory_2")
-
-        if not data.get("roadmap_practice_task"):
-            await state.clear()
-            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
-            return
-
-        if not theory_2:
-            await send_roadmap_practice(message, state, user_id)
-            return
-
-        await state.update_data(roadmap_lesson_step="theory_2")
-        await state.set_state(StudyFlow.viewing_roadmap_lesson)
-        await message.answer(
-            f"Теория 2/2\n\n{theory_2}",
-            reply_markup=roadmap_lesson_step_kb("🧠 К практике", "roadmap_practice"),
-        )
-
-    async def send_roadmap_practice(message: Message, state: FSMContext, user_id: int):
-        data = await state.get_data()
-        practice_task = data.get("roadmap_practice_task")
-
-        if not practice_task:
-            await state.clear()
-            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
-            return
-
-        questions = split_practice_questions(practice_task)
-        await state.set_state(StudyFlow.waiting_roadmap_answer)
-        await state.update_data(
-            roadmap_lesson_step="practice",
-            roadmap_practice_questions=questions,
-            roadmap_practice_index=0,
-            roadmap_practice_answers=[],
-        )
-        await message.answer(f"Практика: {len(questions)} заданий. Отвечайте по одному сообщению.")
-        await message.answer(
-            format_practice_question(questions[0], 0, len(questions)),
-            reply_markup=cancel_kb(),
-        )
-
-    async def check_roadmap_answer(message: Message, state: FSMContext, user_answer: str):
-        data = await state.get_data()
-        topic = data.get("roadmap_topic")
-        lesson = data.get("roadmap_lesson")
-        practice_task = data.get("roadmap_practice_task") or lesson
-        roadmap_kind = data.get("roadmap_kind", "topic")
-
-        if not topic or not lesson:
+        theory_pages = [
+            page
+            for page in [sections["theory_1"], sections["theory_2"], sections["theory_3"]]
+            if page
+        ] or [lesson]
+        quiz_questions = parse_roadmap_quiz(sections["quiz"])
+        if not quiz_questions:
             await state.clear()
             await message.answer(
-                "Состояние roadmap потеряно. Запустите его снова.",
-                reply_markup=main_menu(message.from_user.id),
+                "Не получилось собрать тест из урока. Попробуйте запустить урок ещё раз.",
+                reply_markup=roadmap_kb(),
             )
             return
 
-        if not get_user(message.from_user.id):
+        await state.update_data(
+            roadmap_topic=topic,
+            roadmap_lesson=lesson,
+            roadmap_theory_pages=theory_pages,
+            roadmap_quiz_questions=quiz_questions,
+            roadmap_quiz_answers=[],
+            roadmap_quiz_index=0,
+            roadmap_kind=roadmap_kind,
+            roadmap_lesson_step="theory",
+            roadmap_theory_index=0,
+        )
+        await state.set_state(StudyFlow.viewing_roadmap_lesson)
+        await message.answer(f"🗺 Урок плана: {title}")
+        await send_roadmap_theory_page(message, state, user_id, 0)
+
+    async def send_roadmap_theory_page(message: Message, state: FSMContext, user_id: int, index: int):
+        data = await state.get_data()
+        pages = data.get("roadmap_theory_pages") or []
+
+        if not pages or index >= len(pages):
+            await state.clear()
+            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            return
+
+        next_index = index + 1
+        next_text = "➡️ Дальше" if next_index < len(pages) else "🧪 К тесту"
+        next_callback = f"roadmap_theory:{next_index}" if next_index < len(pages) else "roadmap_quiz_start"
+        await state.update_data(roadmap_lesson_step="theory", roadmap_theory_index=index)
+        await state.set_state(StudyFlow.viewing_roadmap_lesson)
+        await message.answer(
+            f"Теория {index + 1}/{len(pages)}\n\n{pages[index]}",
+            reply_markup=roadmap_lesson_step_kb(next_text, next_callback),
+        )
+
+    async def send_roadmap_quiz_question(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        questions = data.get("roadmap_quiz_questions") or []
+        index = data.get("roadmap_quiz_index", 0)
+
+        if not questions or index >= len(questions):
+            await state.clear()
+            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            return
+
+        await state.set_state(StudyFlow.waiting_roadmap_answer)
+        await state.update_data(
+            roadmap_lesson_step="quiz",
+            roadmap_quiz_index=index,
+        )
+        await message.answer(
+            format_roadmap_quiz_question(questions[index], index, len(questions)),
+            reply_markup=roadmap_quiz_kb(questions[index]),
+        )
+
+    async def finish_roadmap_quiz(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        topic = data.get("roadmap_topic")
+        roadmap_kind = data.get("roadmap_kind", "topic")
+        questions = data.get("roadmap_quiz_questions") or []
+        answers = data.get("roadmap_quiz_answers") or []
+        summary, result = build_roadmap_quiz_summary(questions, answers)
+
+        if not topic or not questions:
+            await state.clear()
+            await message.answer(
+                "Состояние roadmap потеряно. Запустите его снова.",
+                reply_markup=main_menu(user_id),
+            )
+            return
+
+        if not get_user(user_id):
             await state.clear()
             await message.answer("User not found. Please use /start first.")
             return
 
-        if not await ensure_ai_quota(message, message.from_user.id):
-            await state.clear()
-            return
-
         db = SessionLocal()
         try:
-            user = db.query(User).filter(User.telegram_id == message.from_user.id).first()
+            user = db.query(User).filter(User.telegram_id == user_id).first()
             if not user:
                 await state.clear()
                 await message.answer("User not found. Please use /start first.")
                 return
 
-            level = level_label(user.level)
-            review = ask_ai(make_roadmap_check_prompt(topic, level, practice_task, user_answer), level, "roadmap_check")
-            result = parse_roadmap_result(review)
             if roadmap_kind == "review":
                 if result:
                     user.roadmap_review_index = user.current_topic_index or 0
@@ -1419,8 +1474,30 @@ async def main():
             db.close()
 
         await state.clear()
-        await message.answer(review)
-        await message.answer(build_roadmap_text(message.from_user.id), reply_markup=roadmap_kb())
+        await message.answer(summary)
+        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+
+    async def handle_roadmap_quiz_answer(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        questions = data.get("roadmap_quiz_questions") or []
+        index = data.get("roadmap_quiz_index", 0)
+        answers = data.get("roadmap_quiz_answers") or []
+
+        if not questions or index >= len(questions):
+            await state.clear()
+            await call.message.answer("Состояние теста потеряно. Запустите план обучения снова.", reply_markup=main_menu(call.from_user.id))
+            return
+
+        selected_index = int(call.data.split(":", 1)[1])
+        answers.append(selected_index)
+        await call.message.edit_reply_markup(reply_markup=None)
+
+        index += 1
+        await state.update_data(roadmap_quiz_answers=answers, roadmap_quiz_index=index)
+        if index < len(questions):
+            await send_roadmap_quiz_question(call.message, state, call.from_user.id)
+        else:
+            await finish_roadmap_quiz(call.message, state, call.from_user.id)
 
     async def explain_level_errors(wrong_answers: list[dict], target_level: str) -> str:
         details = "\n".join(
@@ -1699,11 +1776,16 @@ Mistakes:
         elif data == "roadmap_start":
             await send_roadmap_lesson(call.message, state, call.from_user.id)
 
-        elif data == "roadmap_theory_2":
-            await send_roadmap_theory_2(call.message, state, call.from_user.id)
+        elif data.startswith("roadmap_theory:"):
+            theory_index = int(data.split(":", 1)[1])
+            await send_roadmap_theory_page(call.message, state, call.from_user.id, theory_index)
 
-        elif data == "roadmap_practice":
-            await send_roadmap_practice(call.message, state, call.from_user.id)
+        elif data == "roadmap_quiz_start":
+            await state.update_data(roadmap_quiz_index=0, roadmap_quiz_answers=[])
+            await send_roadmap_quiz_question(call.message, state, call.from_user.id)
+
+        elif data.startswith("roadmap_quiz_answer:"):
+            await handle_roadmap_quiz_answer(call, state)
 
         elif data == "roadmap_reset_confirm":
             await call.message.answer(
@@ -1928,60 +2010,27 @@ Mistakes:
     @dp.message(StudyFlow.viewing_roadmap_lesson)
     async def roadmap_theory_input(message: Message, state: FSMContext):
         data = await state.get_data()
-        step = data.get("roadmap_lesson_step")
-        if step == "theory_1" and data.get("roadmap_theory_2"):
-            await message.answer(
-                "Сейчас мы на теории. Нажмите «Дальше», потом перейдём к практике.",
-                reply_markup=roadmap_lesson_step_kb("➡️ Дальше", "roadmap_theory_2"),
-            )
-        elif data.get("roadmap_practice_task"):
-            await message.answer(
-                "Теория уже открыта. Нажмите «К практике», чтобы перейти к заданиям.",
-                reply_markup=roadmap_lesson_step_kb("🧠 К практике", "roadmap_practice"),
-            )
-        else:
+        pages = data.get("roadmap_theory_pages") or []
+        index = data.get("roadmap_theory_index", 0)
+        if not pages:
             await state.clear()
             await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(message.from_user.id))
+            return
+
+        next_index = index + 1
+        next_text = "➡️ Дальше" if next_index < len(pages) else "🧪 К тесту"
+        next_callback = f"roadmap_theory:{next_index}" if next_index < len(pages) else "roadmap_quiz_start"
+        await message.answer(
+            "Сейчас мы на теории. Нажмите кнопку под предыдущим сообщением, чтобы идти дальше.",
+            reply_markup=roadmap_lesson_step_kb(next_text, next_callback),
+        )
 
     @dp.message(StudyFlow.waiting_roadmap_answer)
     async def roadmap_answer_input(message: Message, state: FSMContext):
-        user_answer = (message.text or "").strip()
-        if not user_answer:
-            await message.answer("Напишите ответ на текущее задание. Если передумали, нажмите «Отмена».", reply_markup=cancel_kb())
-            return
-
-        data = await state.get_data()
-        questions = data.get("roadmap_practice_questions") or [data.get("roadmap_practice_task", "")]
-        index = data.get("roadmap_practice_index", 0)
-        answers = data.get("roadmap_practice_answers", [])
-
-        if index >= len(questions):
-            await check_roadmap_answer(message, state, user_answer)
-            return
-
-        answers.append({
-            "question": questions[index],
-            "answer": user_answer,
-        })
-        index += 1
-
-        if index < len(questions):
-            await state.update_data(
-                roadmap_practice_index=index,
-                roadmap_practice_answers=answers,
-            )
-            await message.answer(
-                format_practice_question(questions[index], index, len(questions)),
-                reply_markup=cancel_kb(),
-            )
-            return
-
-        await state.update_data(
-            roadmap_practice_index=index,
-            roadmap_practice_answers=answers,
+        await message.answer(
+            "В этом модуле тест с вариантами ответа. Выберите вариант кнопкой под вопросом.",
+            reply_markup=cancel_kb(),
         )
-        await message.answer("Готово, проверяю все ответы вместе.")
-        await check_roadmap_answer(message, state, format_roadmap_answers(answers))
 
     asyncio.create_task(vocab_daily_loop(bot))
     await notify_bot_started(bot)
