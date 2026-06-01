@@ -278,7 +278,12 @@ Student answer:
 
 Return strictly in this format:
 RESULT: correct or incorrect
-FEEDBACK: short Russian feedback. Say what is good, what to fix, and give the corrected version if needed.
+FEEDBACK:
+- Give a short Russian summary for each task.
+- Mark each task as correct, almost correct, or incorrect.
+- If there is a mistake, give the corrected English version and a short Russian explanation.
+- Finish with "Итог:" and name the main thing the student should repeat.
+- If most answers are correct and mistakes are minor, RESULT should be correct.
 """
 
 

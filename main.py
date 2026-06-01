@@ -397,6 +397,32 @@ def split_roadmap_lesson(text: str) -> dict:
     return sections
 
 
+def split_practice_questions(text: str) -> list[str]:
+    matches = re.findall(
+        r"(?ms)^\s*\d{1,2}[\).:-]\s+(.*?)(?=^\s*\d{1,2}[\).:-]\s+|\Z)",
+        text or "",
+    )
+    questions = [match.strip() for match in matches if match.strip()]
+    if questions:
+        return questions[:5]
+
+    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
+    return lines[:5] if lines else [text.strip()]
+
+
+def format_practice_question(question: str, index: int, total: int) -> str:
+    return f"Практика {index + 1}/{total}\n\n{question}"
+
+
+def format_roadmap_answers(answers: list[dict]) -> str:
+    parts = []
+    for index, item in enumerate(answers, start=1):
+        question = item.get("question", "").strip()
+        answer = item.get("answer", "").strip()
+        parts.append(f"{index}. Task: {question}\nStudent answer: {answer}")
+    return "\n\n".join(parts)
+
+
 def get_roadmap_snapshot(user: User) -> dict:
     level = normalize_level(user.level)
     topics = ROADMAP.get(level, [])
@@ -1331,11 +1357,17 @@ async def main():
             await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
             return
 
+        questions = split_practice_questions(practice_task)
         await state.set_state(StudyFlow.waiting_roadmap_answer)
-        await state.update_data(roadmap_lesson_step="practice")
-        await message.answer(f"Практика\n\n{practice_task}")
+        await state.update_data(
+            roadmap_lesson_step="practice",
+            roadmap_practice_questions=questions,
+            roadmap_practice_index=0,
+            roadmap_practice_answers=[],
+        )
+        await message.answer(f"Практика: {len(questions)} заданий. Отвечайте по одному сообщению.")
         await message.answer(
-            "✍️ Отправьте ответы одним сообщением, например: 1) ... 2) ... 3) ... 4) ... 5) ...",
+            format_practice_question(questions[0], 0, len(questions)),
             reply_markup=cancel_kb(),
         )
 
@@ -1386,6 +1418,7 @@ async def main():
         finally:
             db.close()
 
+        await state.clear()
         await message.answer(review)
         await message.answer(build_roadmap_text(message.from_user.id), reply_markup=roadmap_kb())
 
@@ -1914,10 +1947,41 @@ Mistakes:
     async def roadmap_answer_input(message: Message, state: FSMContext):
         user_answer = (message.text or "").strip()
         if not user_answer:
-            await message.answer("Напишите ответ текстом одним сообщением. Если передумали, нажмите «Отмена».", reply_markup=cancel_kb())
+            await message.answer("Напишите ответ на текущее задание. Если передумали, нажмите «Отмена».", reply_markup=cancel_kb())
             return
 
-        await check_roadmap_answer(message, state, user_answer)
+        data = await state.get_data()
+        questions = data.get("roadmap_practice_questions") or [data.get("roadmap_practice_task", "")]
+        index = data.get("roadmap_practice_index", 0)
+        answers = data.get("roadmap_practice_answers", [])
+
+        if index >= len(questions):
+            await check_roadmap_answer(message, state, user_answer)
+            return
+
+        answers.append({
+            "question": questions[index],
+            "answer": user_answer,
+        })
+        index += 1
+
+        if index < len(questions):
+            await state.update_data(
+                roadmap_practice_index=index,
+                roadmap_practice_answers=answers,
+            )
+            await message.answer(
+                format_practice_question(questions[index], index, len(questions)),
+                reply_markup=cancel_kb(),
+            )
+            return
+
+        await state.update_data(
+            roadmap_practice_index=index,
+            roadmap_practice_answers=answers,
+        )
+        await message.answer("Готово, проверяю все ответы вместе.")
+        await check_roadmap_answer(message, state, format_roadmap_answers(answers))
 
     asyncio.create_task(vocab_daily_loop(bot))
     await notify_bot_started(bot)
