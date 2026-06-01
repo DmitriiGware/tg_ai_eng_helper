@@ -733,6 +733,14 @@ def roadmap_reset_confirm_kb():
     ])
 
 
+def roadmap_lesson_step_kb(next_text: str, next_callback: str):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=next_text, callback_data=next_callback)],
+        [InlineKeyboardButton(text=cancel_label(), callback_data="cancel")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
 def yookassa_payment_kb(confirmation_url: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Перейти к оплате", url=confirmation_url)],
@@ -811,6 +819,7 @@ class Registration(StatesGroup):
 class StudyFlow(StatesGroup):
     waiting_topic = State()
     waiting_practice_answer = State()
+    viewing_roadmap_lesson = State()
     waiting_roadmap_answer = State()
 
 
@@ -1271,21 +1280,64 @@ async def main():
             title = format_topic_title(topic)
 
         sections = split_roadmap_lesson(lesson)
+        theory_1 = sections["theory_1"] or lesson
+        theory_2 = sections["theory_2"]
         practice_task = sections["practice"] or lesson
         await state.update_data(
             roadmap_topic=topic,
             roadmap_lesson=lesson,
+            roadmap_theory_1=theory_1,
+            roadmap_theory_2=theory_2,
             roadmap_practice_task=practice_task,
             roadmap_kind=roadmap_kind,
+            roadmap_lesson_step="theory_1",
         )
-        await state.set_state(StudyFlow.waiting_roadmap_answer)
+        await state.set_state(StudyFlow.viewing_roadmap_lesson)
         await message.answer(f"🗺 Урок плана: {title}")
-        if sections["theory_1"]:
-            await message.answer(f"Теория 1/2\n\n{sections['theory_1']}")
-        if sections["theory_2"]:
-            await message.answer(f"Теория 2/2\n\n{sections['theory_2']}")
+        next_text = "➡️ Дальше" if theory_2 else "🧠 К практике"
+        next_callback = "roadmap_theory_2" if theory_2 else "roadmap_practice"
+        theory_title = "Теория 1/2" if theory_2 else "Теория"
+        await message.answer(
+            f"{theory_title}\n\n{theory_1}",
+            reply_markup=roadmap_lesson_step_kb(next_text, next_callback),
+        )
+
+    async def send_roadmap_theory_2(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        theory_2 = data.get("roadmap_theory_2")
+
+        if not data.get("roadmap_practice_task"):
+            await state.clear()
+            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            return
+
+        if not theory_2:
+            await send_roadmap_practice(message, state, user_id)
+            return
+
+        await state.update_data(roadmap_lesson_step="theory_2")
+        await state.set_state(StudyFlow.viewing_roadmap_lesson)
+        await message.answer(
+            f"Теория 2/2\n\n{theory_2}",
+            reply_markup=roadmap_lesson_step_kb("🧠 К практике", "roadmap_practice"),
+        )
+
+    async def send_roadmap_practice(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        practice_task = data.get("roadmap_practice_task")
+
+        if not practice_task:
+            await state.clear()
+            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            return
+
+        await state.set_state(StudyFlow.waiting_roadmap_answer)
+        await state.update_data(roadmap_lesson_step="practice")
         await message.answer(f"Практика\n\n{practice_task}")
-        await message.answer("✍️ Отправьте ответы одним сообщением, например: 1) ... 2) ... 3) ... 4) ... 5) ...", reply_markup=cancel_kb())
+        await message.answer(
+            "✍️ Отправьте ответы одним сообщением, например: 1) ... 2) ... 3) ... 4) ... 5) ...",
+            reply_markup=cancel_kb(),
+        )
 
     async def check_roadmap_answer(message: Message, state: FSMContext, user_answer: str):
         data = await state.get_data()
@@ -1614,6 +1666,12 @@ Mistakes:
         elif data == "roadmap_start":
             await send_roadmap_lesson(call.message, state, call.from_user.id)
 
+        elif data == "roadmap_theory_2":
+            await send_roadmap_theory_2(call.message, state, call.from_user.id)
+
+        elif data == "roadmap_practice":
+            await send_roadmap_practice(call.message, state, call.from_user.id)
+
         elif data == "roadmap_reset_confirm":
             await call.message.answer(
                 "Сбросить план обучения на первую тему текущего уровня?",
@@ -1833,6 +1891,24 @@ Mistakes:
             return
 
         await check_practice_answer(message, state, user_answer)
+
+    @dp.message(StudyFlow.viewing_roadmap_lesson)
+    async def roadmap_theory_input(message: Message, state: FSMContext):
+        data = await state.get_data()
+        step = data.get("roadmap_lesson_step")
+        if step == "theory_1" and data.get("roadmap_theory_2"):
+            await message.answer(
+                "Сейчас мы на теории. Нажмите «Дальше», потом перейдём к практике.",
+                reply_markup=roadmap_lesson_step_kb("➡️ Дальше", "roadmap_theory_2"),
+            )
+        elif data.get("roadmap_practice_task"):
+            await message.answer(
+                "Теория уже открыта. Нажмите «К практике», чтобы перейти к заданиям.",
+                reply_markup=roadmap_lesson_step_kb("🧠 К практике", "roadmap_practice"),
+            )
+        else:
+            await state.clear()
+            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(message.from_user.id))
 
     @dp.message(StudyFlow.waiting_roadmap_answer)
     async def roadmap_answer_input(message: Message, state: FSMContext):
