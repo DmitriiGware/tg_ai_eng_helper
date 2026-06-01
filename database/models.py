@@ -11,6 +11,7 @@ class User(Base):
     frequency = Column(String)
     level = Column(String, default="A1")
     current_topic_index = Column(Integer, default=0)
+    roadmap_review_index = Column(Integer, default=0)
     last_result = Column(String, default="")
     words_per_day = Column(Integer, nullable=True)
     last_vocab_sent_date = Column(String, default="")

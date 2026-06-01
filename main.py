@@ -26,6 +26,7 @@ from prompts import (
     make_practice_task_prompt,
     make_roadmap_check_prompt,
     make_roadmap_lesson_prompt,
+    make_roadmap_review_prompt,
     make_user_prompt,
     make_vocab_words_prompt,
 )
@@ -51,6 +52,7 @@ FREE_DAILY_AI_LIMIT = 5
 FREE_MAX_WORDS_PER_DAY = 3
 PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
+ROADMAP_REVIEW_INTERVAL = 3
 
 LEVELS = [
     ("A1", "A1 Beginner lvl 1"),
@@ -333,6 +335,15 @@ def get_current_topic_number(user_id: int) -> int:
     return user.current_topic_index + 1
 
 
+def get_roadmap_status_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if not user:
+        return "не начат"
+    if is_roadmap_review_due(user):
+        return "повторение"
+    return f"тема {get_current_topic_number(user_id)}"
+
+
 def format_topic_title(topic: str) -> str:
     return topic.replace(" and ", " & ").capitalize()
 
@@ -342,6 +353,48 @@ def progress_bar(done: int, total: int, width: int = 10) -> str:
         return "□" * width
     filled = round((done / total) * width)
     return "■" * filled + "□" * (width - filled)
+
+
+def is_roadmap_review_due(user: User) -> bool:
+    current_index = max(user.current_topic_index or 0, 0)
+    review_index = max(user.roadmap_review_index or 0, 0)
+    return current_index > 0 and current_index - review_index >= ROADMAP_REVIEW_INTERVAL
+
+
+def get_roadmap_review_topics(user: User) -> list[str]:
+    level = normalize_level(user.level)
+    topics = ROADMAP.get(level, [])
+    current_index = min(max(user.current_topic_index or 0, 0), len(topics))
+    review_index = min(max(user.roadmap_review_index or 0, 0), current_index)
+    return topics[review_index:current_index]
+
+
+def split_roadmap_lesson(text: str) -> dict:
+    sections = {"theory_1": "", "theory_2": "", "practice": ""}
+    current = None
+
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        marker = line.upper()
+        if marker == "===THEORY_1===":
+            current = "theory_1"
+            continue
+        if marker == "===THEORY_2===":
+            current = "theory_2"
+            continue
+        if marker == "===PRACTICE===":
+            current = "practice"
+            continue
+        if current:
+            sections[current] += raw_line + "\n"
+
+    for key, value in sections.items():
+        sections[key] = value.strip()
+
+    if not any(sections.values()):
+        sections["theory_1"] = text.strip()
+
+    return sections
 
 
 def get_roadmap_snapshot(user: User) -> dict:
@@ -354,6 +407,8 @@ def get_roadmap_snapshot(user: User) -> dict:
     current_topic = topics[current_index] if current_index < total else None
     next_topics = topics[current_index + 1:current_index + 6] if current_topic else []
     percent = round((done / total) * 100) if total else 0
+    review_due = is_roadmap_review_due(user)
+    review_topics = get_roadmap_review_topics(user) if review_due else []
 
     return {
         "level": level,
@@ -365,6 +420,8 @@ def get_roadmap_snapshot(user: User) -> dict:
         "current_topic": current_topic,
         "next_topics": next_topics,
         "percent": percent,
+        "review_due": review_due,
+        "review_topics": review_topics,
     }
 
 
@@ -386,6 +443,26 @@ def build_roadmap_text(user_id: int) -> str:
             "✅ План уровня завершён. Можно сменить уровень в профиле и продолжить."
         )
 
+    if snapshot["review_due"]:
+        review_lines = "\n".join(
+            f"• {format_topic_title(topic)}"
+            for topic in snapshot["review_topics"]
+        )
+        return (
+            "🗺 План обучения\n\n"
+            f"Уровень: {snapshot['label']}\n"
+            f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
+            f"{progress_bar(done, total)}\n\n"
+            "Сейчас: повторение\n"
+            f"{review_lines}\n\n"
+            "Почему это важно:\n"
+            "После нескольких новых тем бот возвращает старые темы, чтобы они закрепились, а не просто пролетели мимо.\n\n"
+            "Формат урока:\n"
+            "1. Теория 1 — смысл\n"
+            "2. Теория 2 — частые ошибки\n"
+            "3. Практика — 5 заданий"
+        )
+
     next_lines = "\n".join(
         f"{snapshot['current_index'] + offset + 1}. {format_topic_title(topic)}"
         for offset, topic in enumerate(snapshot["next_topics"], start=1)
@@ -403,9 +480,10 @@ def build_roadmap_text(user_id: int) -> str:
         "Следующие темы:\n"
         f"{next_lines}\n\n"
         "Как это работает:\n"
-        "1. Нажмите «Начать урок».\n"
-        "2. Ответьте на задание.\n"
-        "3. Если ответ верный, бот откроет следующую тему."
+        "1. Теория 1 — смысл темы.\n"
+        "2. Теория 2 — как использовать и где ошибаются.\n"
+        "3. Практика — 5 заданий.\n"
+        f"4. Каждые {ROADMAP_REVIEW_INTERVAL} темы — повторение."
     )
 
 
@@ -446,7 +524,7 @@ def mode_prompt_text(mode: str) -> str:
         ),
         "practice": (
             "✍️ Практика с проверкой\n"
-            "Напишите тему, и я дам 3 задания. Потом вы отправите ответы, а я проверю.\n\n"
+            "Напишите тему, и я дам 5 заданий. Потом вы отправите ответы, а я проверю.\n\n"
             "Примеры:\n"
             "• to be\n"
             "• comparatives\n"
@@ -468,7 +546,7 @@ def build_main_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
     words_per_day = get_words_per_day(user_id)
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
-    roadmap_step = get_current_topic_number(user_id)
+    roadmap_status = get_roadmap_status_text(user_id)
     plan = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
 
@@ -480,7 +558,7 @@ def build_main_menu_text(user_id: int) -> str:
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
-        f"• План обучения: тема {roadmap_step}\n\n"
+        f"• План обучения: {roadmap_status}\n\n"
         f"💡 {get_phrase()}"
     )
 
@@ -500,7 +578,7 @@ def build_practice_menu_text() -> str:
         "🧠 Практика\n"
         "Здесь бот даёт задания и проверяет ваши ответы.\n\n"
         "• Мини-тест — 5 вопросов по теме\n"
-        "• Практика — 3 задания с проверкой"
+        "• Практика — 5 заданий с проверкой"
     )
 
 
@@ -832,6 +910,7 @@ async def main():
                 return
 
             user.current_topic_index = 0
+            user.roadmap_review_index = 0
             user.last_result = ""
             db.commit()
         finally:
@@ -1122,7 +1201,7 @@ async def main():
         await state.set_state(StudyFlow.waiting_practice_answer)
         await message.answer(answer)
         await message.answer(
-            "✍️ Напишите ответы одним сообщением, например: 1) ... 2) ... 3) ...\nЯ проверю и дам короткий фидбэк.",
+            "✍️ Напишите ответы одним сообщением, например: 1) ... 2) ... 3) ... 4) ... 5) ...\nЯ проверю и дам короткий фидбэк.",
             reply_markup=cancel_kb(),
         )
 
@@ -1165,9 +1244,11 @@ async def main():
                 await message.answer("User not found. Please use /start first.")
                 return
 
-            topic = get_current_topic(user)
+            review_due = is_roadmap_review_due(user)
+            review_topics = get_roadmap_review_topics(user) if review_due else []
+            topic = "review: " + ", ".join(review_topics) if review_due else get_current_topic(user)
             level = level_label(user.level)
-            simplify = user.last_result == "wrong_twice"
+            simplify = user.last_result in {"wrong_twice", "review_wrong"}
         finally:
             db.close()
 
@@ -1180,17 +1261,38 @@ async def main():
             await state.clear()
             return
 
-        lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
-        await state.update_data(roadmap_topic=topic, roadmap_lesson=lesson)
+        if review_due:
+            lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
+            roadmap_kind = "review"
+            title = "Повторение: " + ", ".join(format_topic_title(topic) for topic in review_topics)
+        else:
+            lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
+            roadmap_kind = "topic"
+            title = format_topic_title(topic)
+
+        sections = split_roadmap_lesson(lesson)
+        practice_task = sections["practice"] or lesson
+        await state.update_data(
+            roadmap_topic=topic,
+            roadmap_lesson=lesson,
+            roadmap_practice_task=practice_task,
+            roadmap_kind=roadmap_kind,
+        )
         await state.set_state(StudyFlow.waiting_roadmap_answer)
-        await message.answer(f"🗺 Урок плана: {format_topic_title(topic)}")
-        await message.answer(lesson)
-        await message.answer("✍️ Отправьте ответ на задание одним сообщением.", reply_markup=cancel_kb())
+        await message.answer(f"🗺 Урок плана: {title}")
+        if sections["theory_1"]:
+            await message.answer(f"Теория 1/2\n\n{sections['theory_1']}")
+        if sections["theory_2"]:
+            await message.answer(f"Теория 2/2\n\n{sections['theory_2']}")
+        await message.answer(f"Практика\n\n{practice_task}")
+        await message.answer("✍️ Отправьте ответы одним сообщением, например: 1) ... 2) ... 3) ... 4) ... 5) ...", reply_markup=cancel_kb())
 
     async def check_roadmap_answer(message: Message, state: FSMContext, user_answer: str):
         data = await state.get_data()
         topic = data.get("roadmap_topic")
         lesson = data.get("roadmap_lesson")
+        practice_task = data.get("roadmap_practice_task") or lesson
+        roadmap_kind = data.get("roadmap_kind", "topic")
 
         if not topic or not lesson:
             await state.clear()
@@ -1218,9 +1320,16 @@ async def main():
                 return
 
             level = level_label(user.level)
-            review = ask_ai(make_roadmap_check_prompt(topic, level, lesson, user_answer), level, "roadmap_check")
+            review = ask_ai(make_roadmap_check_prompt(topic, level, practice_task, user_answer), level, "roadmap_check")
             result = parse_roadmap_result(review)
-            update_progress(user, result)
+            if roadmap_kind == "review":
+                if result:
+                    user.roadmap_review_index = user.current_topic_index or 0
+                    user.last_result = "review_correct"
+                else:
+                    user.last_result = "review_wrong"
+            else:
+                update_progress(user, result)
             db.commit()
         finally:
             db.close()
@@ -1369,6 +1478,7 @@ Mistakes:
                 frequency=freq,
                 level=DEFAULT_LEVEL,
                 current_topic_index=0,
+                roadmap_review_index=0,
                 last_result="",
                 words_per_day=None,
                 last_vocab_sent_date="",

@@ -89,10 +89,12 @@ def make_practice_task_prompt(topic: str, level: str) -> str:
 Тема: {topic}
 Уровень: {level}
 
-Сделай ровно 3 задания:
+Сделай ровно 5 заданий:
 1. Translate into English
 2. Make a sentence
 3. Answer the question
+4. Fill the gap
+5. Correct the mistake
 
 Формат:
 🧠 Practice: {topic}
@@ -104,6 +106,12 @@ def make_practice_task_prompt(topic: str, level: str) -> str:
 Use these words: ...
 
 3. Answer the question:
+...
+
+4. Fill the gap:
+...
+
+5. Correct the mistake:
 ...
 
 Правила:
@@ -133,7 +141,7 @@ def make_practice_check_prompt(topic: str, level: str, task: str, user_answer: s
 
 Формат:
 1. Результат
-- Сколько примерно верно: X/3 или короткая оценка
+- Сколько примерно верно: X/5 или короткая оценка
 
 2. Что хорошо
 - 1-2 коротких пункта
@@ -163,30 +171,85 @@ def make_roadmap_lesson_prompt(topic: str, level: str, simplify: bool = False) -
         simplify_block = """
 Объясни тему намного проще обычного.
 - Используй короткие предложения
-- Дай только 2 простых примера
-- Дай 1 очень простое задание
+- Используй совсем простые примеры
+- Практику сделай легче обычного
 """
 
     return f"""
 Тема: {topic}
 Уровень ученика: {level}
 
-Сделай короткий урок для roadmap.
+Сделай урок для плана обучения. Урок должен состоять из двух коротких блоков теории и практики.
 
-Формат:
-🗺 Тема: {topic}
+Верни ответ строго в таком формате:
 
-1. Смысл
-2. Как использовать
-3. 3 примера: English -> Russian
-4. Частая ошибка
-5. Задание для ответа ученика
+===THEORY_1===
+Коротко объясни смысл темы.
+Дай 2-3 простых примера: English -> Russian.
+
+===THEORY_2===
+Объясни, как использовать тему в речи.
+Покажи формулу или шаблон, если это грамматика.
+Дай частую ошибку и правильный вариант.
+
+===PRACTICE===
+Сделай 5 заданий:
+1. Translate into English
+2. Fill the gap или Correct the mistake
+3. Answer the question
+4. Make a sentence
+5. Correct the mistake или Choose the best option
 
 Правила:
 - Пиши объяснение на русском
-- Не больше 180 слов
-- Дай только 1 задание
+- Не давай правильные ответы заранее
+- Практика должна проверять именно эту тему
+- Ученик должен мочь ответить одним сообщением
+- Для A1-A2 используй очень простые предложения
 - Не давай правильный ответ заранее
+
+{simplify_block}
+"""
+
+
+def make_roadmap_review_prompt(topics: list[str], level: str, simplify: bool = False) -> str:
+    topics_text = ", ".join(topics)
+    simplify_block = ""
+    if simplify:
+        simplify_block = """
+Сделай повторение легче обычного.
+- Используй короткие предложения
+- Дай больше подсказок в заданиях
+"""
+
+    return f"""
+Темы для повторения: {topics_text}
+Уровень ученика: {level}
+
+Сделай урок-повторение для плана обучения. Нужно освежить уже изученные темы и закрепить их практикой.
+
+Верни ответ строго в таком формате:
+
+===THEORY_1===
+Коротко напомни 2-3 главных правила по этим темам.
+Дай простые примеры: English -> Russian.
+
+===THEORY_2===
+Покажи, чем эти темы часто путаются.
+Дай 2 частые ошибки и правильные варианты.
+
+===PRACTICE===
+Сделай 5 заданий на повторение:
+1. Translate into English
+2. Fill the gap
+3. Correct the mistake
+4. Answer the question
+5. Make a sentence
+
+Правила:
+- Не давай ответы заранее
+- Проверяй все перечисленные темы, а не только одну
+- Ученик должен мочь ответить одним сообщением
 
 {simplify_block}
 """

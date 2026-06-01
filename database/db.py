@@ -27,6 +27,11 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN current_topic_index INTEGER DEFAULT 0"
             )
 
+        if "roadmap_review_index" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN roadmap_review_index INTEGER DEFAULT 0"
+            )
+
         if "last_result" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN last_result VARCHAR DEFAULT ''"
