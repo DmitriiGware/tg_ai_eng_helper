@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 from ai_client import ask_ai
 from database.db import SessionLocal, engine, ensure_user_progress_columns
-from database.models import Base, RoadmapLessonCache, User, UserMistake, VocabWord
+from database.models import Base, IrregularVerbHistory, RoadmapLessonCache, User, UserMistake, VocabWord
 from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
@@ -49,6 +49,7 @@ DEFAULT_LEVEL = "A1"
 DEFAULT_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 DAILY_MISTAKE_HOUR = 18
+DAILY_IRREGULAR_VERBS_HOUR = 19
 DEFAULT_TIMEZONE_OFFSET = "+03:00"
 DELIVERY_HOURS = list(range(8, 23))
 TIMEZONE_OPTIONS = [
@@ -69,6 +70,8 @@ TIMEZONE_OPTIONS = [
     ("+12:00", "Окленд"),
 ]
 RECENT_VOCAB_HISTORY_LIMIT = 80
+RECENT_IRREGULAR_VERBS_HISTORY_LIMIT = 60
+IRREGULAR_VERBS_PER_DAY = 5
 FREE_DAILY_AI_LIMIT = 5
 FREE_MAX_WORDS_PER_DAY = 3
 PREMIUM_MAX_WORDS_PER_DAY = 10
@@ -98,6 +101,60 @@ LEGACY_LEVELS = {
     "Intermediate": "B1",
     "Advanced": "C1",
 }
+IRREGULAR_VERBS = [
+    ("be", "was/were", "been", "быть", "I was at home yesterday."),
+    ("become", "became", "become", "становиться", "She became a doctor."),
+    ("begin", "began", "begun", "начинать", "The lesson began at nine."),
+    ("break", "broke", "broken", "ломать", "He broke his phone."),
+    ("bring", "brought", "brought", "приносить", "Please bring your notebook."),
+    ("buy", "bought", "bought", "покупать", "I bought a new book."),
+    ("catch", "caught", "caught", "ловить; успевать", "We caught the bus."),
+    ("choose", "chose", "chosen", "выбирать", "They chose the blue one."),
+    ("come", "came", "come", "приходить", "She came home late."),
+    ("do", "did", "done", "делать", "I did my homework."),
+    ("drink", "drank", "drunk", "пить", "He drank some water."),
+    ("drive", "drove", "driven", "водить", "My dad drove to work."),
+    ("eat", "ate", "eaten", "есть", "We ate dinner together."),
+    ("fall", "fell", "fallen", "падать", "The glass fell down."),
+    ("feel", "felt", "felt", "чувствовать", "I felt tired."),
+    ("find", "found", "found", "находить", "She found her keys."),
+    ("forget", "forgot", "forgotten", "забывать", "I forgot his name."),
+    ("get", "got", "got/gotten", "получать; становиться", "I got your message."),
+    ("give", "gave", "given", "давать", "He gave me advice."),
+    ("go", "went", "gone", "идти; ехать", "They went to the park."),
+    ("grow", "grew", "grown", "расти", "The city grew fast."),
+    ("have", "had", "had", "иметь", "We had a good day."),
+    ("hear", "heard", "heard", "слышать", "I heard a strange sound."),
+    ("keep", "kept", "kept", "хранить; держать", "She kept the ticket."),
+    ("know", "knew", "known", "знать", "I knew the answer."),
+    ("leave", "left", "left", "уходить; оставлять", "He left early."),
+    ("lose", "lost", "lost", "терять", "I lost my wallet."),
+    ("make", "made", "made", "делать; создавать", "She made breakfast."),
+    ("meet", "met", "met", "встречать", "We met at school."),
+    ("pay", "paid", "paid", "платить", "I paid by card."),
+    ("put", "put", "put", "класть", "Put it on the table."),
+    ("read", "read", "read", "читать", "I read the email."),
+    ("run", "ran", "run", "бежать", "He ran very fast."),
+    ("say", "said", "said", "сказать", "She said hello."),
+    ("see", "saw", "seen", "видеть", "I saw him yesterday."),
+    ("sell", "sold", "sold", "продавать", "They sold their car."),
+    ("send", "sent", "sent", "отправлять", "I sent you a file."),
+    ("sit", "sat", "sat", "сидеть", "We sat near the window."),
+    ("sleep", "slept", "slept", "спать", "The baby slept well."),
+    ("speak", "spoke", "spoken", "говорить", "He spoke English."),
+    ("spend", "spent", "spent", "тратить; проводить время", "I spent two hours there."),
+    ("stand", "stood", "stood", "стоять", "She stood by the door."),
+    ("swim", "swam", "swum", "плавать", "They swam in the sea."),
+    ("take", "took", "taken", "брать", "I took a taxi."),
+    ("teach", "taught", "taught", "учить; преподавать", "My friend taught me chess."),
+    ("tell", "told", "told", "рассказывать; говорить", "He told me the truth."),
+    ("think", "thought", "thought", "думать", "I thought about it."),
+    ("understand", "understood", "understood", "понимать", "She understood the rule."),
+    ("wake", "woke", "woken", "просыпаться; будить", "I woke up early."),
+    ("wear", "wore", "worn", "носить одежду", "He wore a black jacket."),
+    ("win", "won", "won", "выигрывать", "Our team won the game."),
+    ("write", "wrote", "written", "писать", "I wrote a short note."),
+]
 
 
 def normalize_level(level: str | None) -> str:
@@ -223,10 +280,11 @@ def get_free_plan_text() -> str:
     return (
         "Free:\n"
         f"• {FREE_DAILY_AI_LIMIT} AI-запросов в день\n"
-        "• План обучения, разбор темы, тренировка и шпаргалки\n"
-        "• Roadmap: готовые модули без расхода AI-запросов, новые темы тратят запрос\n"
+        "• Путь изучения, разбор темы, тренировка и шпаргалки\n"
+        "• Путь изучения: готовые модули без расхода AI-запросов, новые темы тратят запрос\n"
         f"• Vocabulary до {FREE_MAX_WORDS_PER_DAY} слов в день\n"
         "• Глоссарий, профиль, уровень и помощь без лимита\n"
+        "• Irregular verbs недоступны\n"
         "• Chat и Voice недоступны"
     )
 
@@ -236,8 +294,9 @@ def get_premium_plan_text() -> str:
         "Premium:\n"
         "• AI-запросы без дневного лимита\n"
         "• Разборы, тренировки и шпаргалки без лимита\n"
-        "• Roadmap без лимита\n"
+        "• Путь изучения без лимита\n"
         f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
+        f"• Irregular verbs: {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день\n"
         "• Chat и Voice\n"
         "• приоритет для новых функций"
     )
@@ -401,6 +460,11 @@ def get_words_per_day(user_id: int) -> int | None:
     return user.words_per_day if user else None
 
 
+def is_irregular_verbs_enabled(user_id: int) -> bool:
+    user = get_user(user_id)
+    return bool(user and user.irregular_verbs_enabled)
+
+
 def get_delivery_settings(user_id: int) -> dict:
     user = get_user(user_id)
     if not user:
@@ -408,12 +472,14 @@ def get_delivery_settings(user_id: int) -> dict:
             "timezone_offset": DEFAULT_TIMEZONE_OFFSET,
             "vocab_hour": DAILY_VOCAB_HOUR,
             "mistake_hour": DAILY_MISTAKE_HOUR,
+            "irregular_verbs_hour": DAILY_IRREGULAR_VERBS_HOUR,
         }
 
     return {
         "timezone_offset": user.timezone_offset or DEFAULT_TIMEZONE_OFFSET,
         "vocab_hour": delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR),
         "mistake_hour": delivery_hour(user.mistake_hour, DAILY_MISTAKE_HOUR),
+        "irregular_verbs_hour": delivery_hour(user.irregular_verbs_hour, DAILY_IRREGULAR_VERBS_HOUR),
     }
 
 
@@ -1225,12 +1291,12 @@ def build_roadmap_text(user_id: int) -> str:
 
     if not snapshot["current_topic"]:
         return (
-            "🗺 План обучения\n\n"
+            "🗺 Путь изучения\n\n"
             "Это основной путь бота: идёте по темам уровня, а ошибки потом попадают в тренировку.\n\n"
             f"Уровень: {snapshot['label']}\n"
             f"Прогресс: {done}/{total} тем • 100%\n"
             f"{progress_bar(done, total)}\n\n"
-            "✅ План уровня завершён. Можно сменить уровень в профиле и продолжить."
+            "✅ Путь уровня завершён. Можно сменить уровень в профиле и продолжить."
         )
 
     if snapshot["review_due"]:
@@ -1239,7 +1305,7 @@ def build_roadmap_text(user_id: int) -> str:
             for topic in snapshot["review_topics"]
         )
         return (
-            "🗺 План обучения\n\n"
+            "🗺 Путь изучения\n\n"
             "Это основной путь бота: учим темы по порядку и возвращаем ошибки в тренировку.\n\n"
             f"Уровень: {snapshot['label']}\n"
             f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
@@ -1262,7 +1328,7 @@ def build_roadmap_text(user_id: int) -> str:
         next_lines = "Это последняя тема уровня."
 
     return (
-        "🗺 План обучения\n\n"
+        "🗺 Путь изучения\n\n"
         "Это основной путь бота: проходите темы по уровню, а тренировка потом повторяет ваши ошибки.\n\n"
         f"Уровень: {snapshot['label']}\n"
         f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
@@ -1346,7 +1412,7 @@ def mode_prompt_text(mode: str) -> str:
         ),
         "practice": (
             "✍️ Тренировка\n"
-            "Сначала я беру ваши сохранённые ошибки из плана и прошлых заданий. Если ошибок пока нет, напишите тему для обычной тренировки.\n\n"
+            "Сначала я беру ваши сохранённые ошибки из пути изучения и прошлых заданий. Если ошибок пока нет, напишите тему для обычной тренировки.\n\n"
             "Примеры:\n"
             "• to be\n"
             "• comparatives\n"
@@ -1368,6 +1434,7 @@ def build_main_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
     words_per_day = get_words_per_day(user_id)
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
+    irregular_text = "включены" if is_irregular_verbs_enabled(user_id) and is_premium(user_id) else "выключены"
     roadmap_status = get_roadmap_status_text(user_id)
     plan = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
@@ -1375,13 +1442,14 @@ def build_main_menu_text(user_id: int) -> str:
 
     return (
         "✨ English Hub\n"
-        "Как учиться: «План обучения» — основной путь, «Тренировка» — повтор ваших ошибок, «Разбор темы» — помощь по конкретному вопросу.\n\n"
+        "Как учиться: «Путь изучения» — основной маршрут, «Тренировка» — повтор ваших ошибок, «Разбор темы» — помощь по конкретному вопросу.\n\n"
         "Ваш прогресс\n"
         f"• Тариф: {plan}\n"
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
-        f"• План обучения: {roadmap_status}\n"
+        f"• Неправильные глаголы: {irregular_text}\n"
+        f"• Путь изучения: {roadmap_status}\n"
         f"• Исправлено ошибок: {mastered_count}\n\n"
         f"💡 {get_phrase()}"
     )
@@ -1395,16 +1463,18 @@ def build_learning_guide_text(user_id: int) -> str:
         "ℹ️ Как учиться в этом боте\n\n"
         "0. Входная диагностика\n"
         "При первом запуске бот задаёт короткий тест и ставит стартовый уровень.\n\n"
-        "1. План обучения\n"
+        "1. Путь изучения\n"
         "Основной путь. Бот ведёт по темам уровня, даёт теорию и короткий тест.\n\n"
         "2. Тренировка\n"
-        "Повторяет ваши старые ошибки из плана, тестов и прошлых заданий. Это главный режим закрепления.\n"
+        "Повторяет ваши старые ошибки из пути изучения, тестов и прошлых заданий. Это главный режим закрепления.\n"
         f"Уже исправлено ошибок: {mastered_count}.\n"
         f"Ошибка дня приходит после {delivery['mistake_hour']:02d}:00 по вашему местному времени ({zone_label}).\n\n"
         "3. Разбор темы\n"
         "Для разового вопроса: когда нужно понять конкретное правило или пример.\n\n"
         "4. Шпаргалка и слова\n"
-        "Помогают быстро вспомнить тему и расширить словарь."
+        "Помогают быстро вспомнить тему и расширить словарь.\n\n"
+        "5. Irregular verbs\n"
+        "Premium-рассылка: каждый день 5 неправильных глаголов с формами и примером."
     )
 
 
@@ -1414,7 +1484,8 @@ def build_learning_menu_text() -> str:
         "Здесь только объяснение и справочные материалы.\n\n"
         "• Разбор темы — понять правило и примеры\n"
         "• Шпаргалка — быстро освежить тему\n"
-        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
+        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free\n"
+        "• Irregular verbs — ежедневные неправильные глаголы в Premium"
     )
 
 
@@ -1424,7 +1495,7 @@ def build_practice_menu_text() -> str:
         "Это режим закрепления, а не основной урок.\n\n"
         "• Работа над вашими ошибками — без нового AI-запроса\n"
         "• Если ошибок пока нет — обычная тренировка по теме\n"
-        "• План обучения — теория и короткие тесты по уровню"
+        "• Путь изучения — теория и короткие тесты по уровню"
     )
 
 
@@ -1432,7 +1503,7 @@ def build_advanced_menu_text() -> str:
     return (
         "🚀 Продвинутые режимы\n"
         "Выберите формат тренировки.\n\n"
-        "• План обучения — пошаговые темы по уровню\n"
+        "• Путь изучения — пошаговые темы по уровню\n"
         "• Чат-тренировка — практика диалога по ситуации\n"
         "• Голос — скоро"
     )
@@ -1442,6 +1513,7 @@ def build_settings_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
     words_per_day = get_words_per_day(user_id)
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
+    irregular_text = "включены" if is_irregular_verbs_enabled(user_id) and is_premium(user_id) else "выключены"
     plan = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
     delivery = get_delivery_settings(user_id)
@@ -1454,6 +1526,7 @@ def build_settings_menu_text(user_id: int) -> str:
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
+        f"• Irregular verbs: {irregular_text}\n"
         f"• Ваше время: {zone_label}\n"
         f"• Слова: {delivery['vocab_hour']:02d}:00\n"
         f"• Ошибки: {delivery['mistake_hour']:02d}:00\n\n"
@@ -1471,7 +1544,8 @@ def build_delivery_settings_text(user_id: int) -> str:
         f"• Ваше время: {zone_label}\n"
         f"• Технически: UTC{delivery['timezone_offset']}\n"
         f"• Слова на день: {delivery['vocab_hour']:02d}:00\n"
-        f"• Ошибка дня: {delivery['mistake_hour']:02d}:00"
+        f"• Ошибка дня: {delivery['mistake_hour']:02d}:00\n"
+        f"• Irregular verbs: {delivery['irregular_verbs_hour']:02d}:00"
     )
 
 
@@ -1525,8 +1599,9 @@ def build_premium_text(user_id: int) -> str:
 
 
 def main_menu(user_id: int):
+    irregular_label = "🔥 Irregular verbs" if is_premium(user_id) else "🔥 Irregular verbs 🔒"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
         [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [
             InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
@@ -1536,6 +1611,7 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
             InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
+        [InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings")],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
@@ -1549,12 +1625,16 @@ def main_menu(user_id: int):
 
 
 def learning_menu(user_id: int):
+    irregular_label = "🔥 Irregular verbs" if is_premium(user_id) else "🔥 Irregular verbs 🔒"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
         ],
-        [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
+        [
+            InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
+            InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
+        ],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -1562,7 +1642,7 @@ def learning_menu(user_id: int):
 def practice_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice")],
-        [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
         [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -1577,7 +1657,7 @@ def advanced_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
-            InlineKeyboardButton(text=lock("🗺 План обучения", "roadmap"), callback_data="mode_roadmap"),
+            InlineKeyboardButton(text=lock("🗺 Путь изучения", "roadmap"), callback_data="mode_roadmap"),
         ],
         [InlineKeyboardButton(text=lock("🎤 Голос скоро", "voice"), callback_data="mode_voice")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
@@ -1601,6 +1681,7 @@ def delivery_settings_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✨ Время словаря", callback_data="delivery_vocab_hour")],
         [InlineKeyboardButton(text="✍️ Время ошибок", callback_data="delivery_mistake_hour")],
+        [InlineKeyboardButton(text="🔥 Время irregular verbs", callback_data="delivery_irregular_verbs_hour")],
         [InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="delivery_timezone")],
         [InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
@@ -1892,7 +1973,7 @@ async def main():
         finally:
             db.close()
 
-        await message.answer("🔄 Прогресс плана обучения сброшен.", reply_markup=roadmap_kb())
+        await message.answer("🔄 Прогресс пути изучения сброшен.", reply_markup=roadmap_kb())
         await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
 
     async def send_stars_invoice(bot: Bot, user_id: int):
@@ -1900,7 +1981,7 @@ async def main():
         await bot.send_invoice(
             chat_id=user_id,
             title=f"Premium на {DEFAULT_PREMIUM_DAYS} дней",
-            description="Безлимитные AI-объяснения, проверка практики и roadmap.",
+            description="Безлимитные AI-объяснения, проверка практики и путь изучения.",
             payload=payload,
             provider_token="",
             currency="XTR",
@@ -2065,6 +2146,31 @@ async def main():
 
         return result
 
+    def normalize_irregular_verb_key(verb: str) -> str:
+        return (verb or "").strip().lower()
+
+    def select_irregular_verbs(recent_verbs: list[str], count: int = IRREGULAR_VERBS_PER_DAY) -> list[tuple[str, str, str, str, str]]:
+        recent_keys = {normalize_irregular_verb_key(verb) for verb in recent_verbs}
+        available = [
+            verb
+            for verb in IRREGULAR_VERBS
+            if normalize_irregular_verb_key(verb[0]) not in recent_keys
+        ]
+        if len(available) < count:
+            available = IRREGULAR_VERBS[:]
+
+        return random.sample(available, min(count, len(available)))
+
+    def format_irregular_verbs(entries: list[tuple[str, str, str, str, str]]) -> str:
+        blocks = []
+        for index, (base, past, participle, translation, example) in enumerate(entries, start=1):
+            blocks.append(
+                f"{index}. {base} — {past} — {participle}\n"
+                f"   {translation}\n"
+                f"   {example}"
+            )
+        return "\n\n".join(blocks)
+
     async def show_vocab_settings(message: Message, user_id: int):
         current_value = get_words_per_day(user_id) or DEFAULT_WORDS_PER_DAY
         max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
@@ -2076,6 +2182,36 @@ async def main():
             f"Ваш максимум сейчас: {max_words}.",
             reply_markup=vocab_count_kb(user_id, current_value),
         )
+
+    async def show_irregular_verbs_settings(message: Message, user_id: int):
+        if not is_premium(user_id):
+            await message.answer(
+                "🔒 Irregular verbs — Premium-функция.\n\n"
+                f"В Premium бот будет присылать по {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день: base, past simple, past participle, перевод и пример.",
+                reply_markup=premium_kb(),
+            )
+            return
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user:
+                await message.answer("User not found. Please use /start first.")
+                return
+
+            user.irregular_verbs_enabled = 1
+            user.last_irregular_verbs_sent_date = ""
+            db.commit()
+            hour = delivery_hour(user.irregular_verbs_hour, DAILY_IRREGULAR_VERBS_HOUR)
+        finally:
+            db.close()
+
+        await message.answer(
+            "🔥 Irregular verbs включены.\n"
+            f"Каждый день после {hour:02d}:00 по вашему времени бот будет присылать {IRREGULAR_VERBS_PER_DAY} неправильных глаголов.\n"
+            "Первую подборку отправляю сейчас."
+        )
+        await send_irregular_verbs(bot, user_id, force=True)
 
     async def send_vocab_words(bot: Bot, user_id: int, force: bool = False):
         db = SessionLocal()
@@ -2149,6 +2285,61 @@ async def main():
         finally:
             db.close()
 
+    async def send_irregular_verbs(bot: Bot, user_id: int, force: bool = False) -> bool:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user or not user.irregular_verbs_enabled:
+                return False
+            if not is_premium_user(user):
+                return False
+
+            today = user_local_today(user)
+            target_hour = delivery_hour(user.irregular_verbs_hour, DAILY_IRREGULAR_VERBS_HOUR)
+            if not force and not is_delivery_due(user, user.last_irregular_verbs_sent_date, target_hour):
+                return False
+
+            recent_verbs = [
+                item.base_form
+                for item in db.query(IrregularVerbHistory)
+                .filter(IrregularVerbHistory.telegram_id == user_id)
+                .order_by(IrregularVerbHistory.id.desc())
+                .limit(RECENT_IRREGULAR_VERBS_HISTORY_LIMIT)
+                .all()
+            ]
+        finally:
+            db.close()
+
+        entries = select_irregular_verbs(recent_verbs)
+        if not entries:
+            return False
+
+        await bot.send_message(
+            user_id,
+            "🔥 Irregular verbs на сегодня\n"
+            "Формы: base — past simple — past participle\n\n"
+            f"{format_irregular_verbs(entries)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+            ]),
+        )
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if user:
+                user.last_irregular_verbs_sent_date = today
+                for base, _, _, _, _ in entries:
+                    db.add(IrregularVerbHistory(
+                        telegram_id=user_id,
+                        base_form=base,
+                        sent_date=today,
+                    ))
+                db.commit()
+            return True
+        finally:
+            db.close()
+
     async def send_daily_mistake(bot: Bot, user_id: int) -> bool:
         db = SessionLocal()
         try:
@@ -2214,6 +2405,23 @@ async def main():
                         logging.exception("Failed to send daily mistake to %s: %s", user.telegram_id, exc)
             except Exception as exc:
                 logging.exception("Mistake daily loop failed: %s", exc)
+
+            await asyncio.sleep(3600)
+
+    async def irregular_verbs_daily_loop(bot: Bot):
+        while True:
+            try:
+                db = SessionLocal()
+                users = db.query(User).all()
+                db.close()
+
+                for user in users:
+                    try:
+                        await send_irregular_verbs(bot, user.telegram_id)
+                    except Exception as exc:
+                        logging.exception("Failed to send daily irregular verbs to %s: %s", user.telegram_id, exc)
+            except Exception as exc:
+                logging.exception("Irregular verbs daily loop failed: %s", exc)
 
             await asyncio.sleep(3600)
 
@@ -2483,7 +2691,7 @@ async def main():
 
         if not topic:
             await state.clear()
-            await message.answer("✅ План обучения завершён.", reply_markup=roadmap_kb())
+            await message.answer("✅ Путь изучения завершён.", reply_markup=roadmap_kb())
             return
 
         if review_due:
@@ -2556,7 +2764,7 @@ async def main():
             roadmap_theory_index=0,
         )
         await state.set_state(StudyFlow.viewing_roadmap_lesson)
-        await message.answer(f"🗺 Урок плана: {title}")
+        await message.answer(f"🗺 Урок пути изучения: {title}")
         await send_roadmap_theory_page(message, state, user_id, 0)
 
     async def send_roadmap_theory_page(message: Message, state: FSMContext, user_id: int, index: int):
@@ -2565,7 +2773,7 @@ async def main():
 
         if not pages or index >= len(pages):
             await state.clear()
-            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            await message.answer("Состояние урока потеряно. Запустите путь изучения снова.", reply_markup=main_menu(user_id))
             return
 
         next_index = index + 1
@@ -2585,7 +2793,7 @@ async def main():
 
         if not questions or index >= len(questions):
             await state.clear()
-            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(user_id))
+            await message.answer("Состояние урока потеряно. Запустите путь изучения снова.", reply_markup=main_menu(user_id))
             return
 
         await state.set_state(StudyFlow.waiting_roadmap_answer)
@@ -2609,7 +2817,7 @@ async def main():
         if not topic or not questions:
             await state.clear()
             await message.answer(
-                "Состояние roadmap потеряно. Запустите его снова.",
+                "Состояние пути изучения потеряно. Запустите его снова.",
                 reply_markup=main_menu(user_id),
             )
             return
@@ -2667,7 +2875,7 @@ async def main():
 
         if not topic or not questions or index >= len(questions):
             await state.clear()
-            await call.message.answer("Состояние теста потеряно. Запустите план обучения снова.", reply_markup=main_menu(call.from_user.id))
+            await call.message.answer("Состояние теста потеряно. Запустите путь изучения снова.", reply_markup=main_menu(call.from_user.id))
             return
 
         selected_index = int(call.data.split(":", 1)[1])
@@ -2849,7 +3057,7 @@ Mistakes:
             "✅ Диагностика завершена.\n\n"
             f"Стартовый уровень: {level_label(level)}\n\n"
             f"Результаты:\n{format_placement_scores(scores, totals)}\n\n"
-            "Дальше лучше начать с «Плана обучения». Ошибки из диагностики уже добавлены в тренировку.",
+            "Дальше лучше начать с «Пути изучения». Ошибки из диагностики уже добавлены в тренировку.",
             reply_markup=main_menu(call.from_user.id),
         )
 
@@ -2924,9 +3132,12 @@ Mistakes:
                 words_per_day=None,
                 last_vocab_sent_date="",
                 last_mistake_sent_date="",
+                irregular_verbs_enabled=0,
+                last_irregular_verbs_sent_date="",
                 timezone_offset=DEFAULT_TIMEZONE_OFFSET,
                 vocab_hour=DAILY_VOCAB_HOUR,
                 mistake_hour=DAILY_MISTAKE_HOUR,
+                irregular_verbs_hour=DAILY_IRREGULAR_VERBS_HOUR,
                 premium_until="",
                 ai_requests_date="",
                 ai_requests_count=0,
@@ -3100,6 +3311,17 @@ Mistakes:
                 reply_markup=delivery_hour_kb("mistake", delivery["mistake_hour"]),
             )
 
+        elif data == "delivery_irregular_verbs_hour":
+            if not is_premium(call.from_user.id):
+                await call.message.answer("🔒 Irregular verbs доступны только в Premium.", reply_markup=premium_kb())
+                return
+
+            delivery = get_delivery_settings(call.from_user.id)
+            await call.message.edit_text(
+                "🔥 Выберите время прихода irregular verbs.\nВремя считается по вашему часовому поясу.",
+                reply_markup=delivery_hour_kb("irregular_verbs", delivery["irregular_verbs_hour"]),
+            )
+
         elif data == "delivery_timezone":
             delivery = get_delivery_settings(call.from_user.id)
             await call.message.edit_text(
@@ -3127,6 +3349,18 @@ Mistakes:
                 user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
                 if user:
                     user.mistake_hour = hour
+                    db.commit()
+            finally:
+                db.close()
+            await call.message.edit_text(build_delivery_settings_text(call.from_user.id), reply_markup=delivery_settings_kb())
+
+        elif data.startswith("set_irregular_verbs_hour:"):
+            hour = int(data.split(":", 1)[1])
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if user:
+                    user.irregular_verbs_hour = hour
                     db.commit()
             finally:
                 db.close()
@@ -3169,7 +3403,7 @@ Mistakes:
 
         elif data == "roadmap_reset_confirm":
             await call.message.answer(
-                "Сбросить план обучения на первую тему текущего уровня?",
+                "Сбросить путь изучения на первую тему текущего уровня?",
                 reply_markup=roadmap_reset_confirm_kb(),
             )
 
@@ -3230,6 +3464,10 @@ Mistakes:
             await state.clear()
             await show_vocab_settings(call.message, call.from_user.id)
 
+        elif data == "irregular_verbs_settings":
+            await state.clear()
+            await show_irregular_verbs_settings(call.message, call.from_user.id)
+
         elif data.startswith("set_vocab_count:"):
             value = int(data.split(":", 1)[1])
             if value < 3 or value > 10:
@@ -3270,7 +3508,7 @@ Mistakes:
 
             if mode == "voice":
                 await call.message.answer(
-                    "🎤 Голосовой режим пока готовится.\n\nСейчас можно пользоваться текстовыми режимами: объяснение, практика, тесты и план обучения.",
+                    "🎤 Голосовой режим пока готовится.\n\nСейчас можно пользоваться текстовыми режимами: объяснение, практика, тесты и путь изучения.",
                     reply_markup=main_menu(call.from_user.id),
                 )
                 return
@@ -3347,7 +3585,7 @@ Mistakes:
                     db.close()
 
                 await call.message.edit_text(
-                    f"✅ Уровень изменен на {level_label(level)}.\nПлан обучения начнётся с первой темы.",
+                    f"✅ Уровень изменен на {level_label(level)}.\nПуть изучения начнётся с первой темы.",
                     reply_markup=main_menu(call.from_user.id),
                 )
                 return
@@ -3456,7 +3694,7 @@ Mistakes:
         index = data.get("roadmap_theory_index", 0)
         if not pages:
             await state.clear()
-            await message.answer("Состояние урока потеряно. Запустите план обучения снова.", reply_markup=main_menu(message.from_user.id))
+            await message.answer("Состояние урока потеряно. Запустите путь изучения снова.", reply_markup=main_menu(message.from_user.id))
             return
 
         next_index = index + 1
@@ -3476,6 +3714,7 @@ Mistakes:
 
     asyncio.create_task(vocab_daily_loop(bot))
     asyncio.create_task(mistake_daily_loop(bot))
+    asyncio.create_task(irregular_verbs_daily_loop(bot))
     await notify_bot_started(bot)
     await dp.start_polling(bot)
 

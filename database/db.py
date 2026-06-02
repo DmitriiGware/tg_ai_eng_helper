@@ -52,6 +52,16 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN last_mistake_sent_date VARCHAR DEFAULT ''"
             )
 
+        if "irregular_verbs_enabled" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN irregular_verbs_enabled INTEGER DEFAULT 0"
+            )
+
+        if "last_irregular_verbs_sent_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_irregular_verbs_sent_date VARCHAR DEFAULT ''"
+            )
+
         if "timezone_offset" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN timezone_offset VARCHAR DEFAULT '+03:00'"
@@ -65,6 +75,11 @@ def ensure_user_progress_columns():
         if "mistake_hour" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN mistake_hour INTEGER DEFAULT 18"
+            )
+
+        if "irregular_verbs_hour" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN irregular_verbs_hour INTEGER DEFAULT 19"
             )
 
         if "premium_until" not in columns:

@@ -20,7 +20,7 @@ MODES = {
         "premium": True,
     },
     "roadmap": {
-        "title": "План обучения",
+        "title": "Путь изучения",
         "premium": False,
     },
     "voice": {
