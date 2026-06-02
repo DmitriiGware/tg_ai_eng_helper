@@ -47,6 +47,26 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN last_vocab_sent_date VARCHAR DEFAULT ''"
             )
 
+        if "last_mistake_sent_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_mistake_sent_date VARCHAR DEFAULT ''"
+            )
+
+        if "timezone_offset" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN timezone_offset VARCHAR DEFAULT '+03:00'"
+            )
+
+        if "vocab_hour" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN vocab_hour INTEGER DEFAULT 10"
+            )
+
+        if "mistake_hour" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN mistake_hour INTEGER DEFAULT 18"
+            )
+
         if "premium_until" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN premium_until VARCHAR DEFAULT ''"

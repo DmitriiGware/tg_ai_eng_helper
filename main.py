@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -47,12 +48,40 @@ PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "150").strip())
 DEFAULT_LEVEL = "A1"
 DEFAULT_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
+DAILY_MISTAKE_HOUR = 18
+DEFAULT_TIMEZONE_OFFSET = "+03:00"
+DELIVERY_HOURS = list(range(8, 23))
+TIMEZONE_OPTIONS = [
+    ("-08:00", "Лос-Анджелес, Ванкувер"),
+    ("-05:00", "Нью-Йорк, Торонто"),
+    ("-03:00", "Буэнос-Айрес"),
+    ("+00:00", "Лондон, Лиссабон"),
+    ("+01:00", "Берлин, Париж, Рим"),
+    ("+02:00", "Киев, Афины, Хельсинки"),
+    ("+03:00", "Москва, Стамбул, Минск"),
+    ("+04:00", "Дубай, Баку, Ереван"),
+    ("+05:00", "Ташкент, Алматы"),
+    ("+06:00", "Бишкек, Астана"),
+    ("+07:00", "Бангкок, Джакарта"),
+    ("+08:00", "Пекин, Сингапур"),
+    ("+09:00", "Токио, Сеул"),
+    ("+10:00", "Сидней"),
+    ("+12:00", "Окленд"),
+]
 RECENT_VOCAB_HISTORY_LIMIT = 80
 FREE_DAILY_AI_LIMIT = 5
 FREE_MAX_WORDS_PER_DAY = 3
 PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 ROADMAP_REVIEW_INTERVAL = 3
+MASTERED_MISTAKES_PAGE_SIZE = 5
+PLACEMENT_TEST_PLAN = [
+    ("A1", 2),
+    ("A2", 2),
+    ("B1", 2),
+    ("B2", 1),
+    ("C1", 1),
+]
 
 LEVELS = [
     ("A1", "A1 Beginner lvl 1"),
@@ -96,6 +125,45 @@ def today_key() -> str:
 
 def now_key() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def parse_timezone_offset(offset: str | None) -> timedelta:
+    offset = offset or DEFAULT_TIMEZONE_OFFSET
+    match = re.match(r"^([+-])(\d{2}):(\d{2})$", offset)
+    if not match:
+        offset = DEFAULT_TIMEZONE_OFFSET
+        match = re.match(r"^([+-])(\d{2}):(\d{2})$", offset)
+
+    sign, hours, minutes = match.groups()
+    delta = timedelta(hours=int(hours), minutes=int(minutes))
+    return delta if sign == "+" else -delta
+
+
+def user_local_datetime(user: User) -> datetime:
+    return datetime.utcnow() + parse_timezone_offset(user.timezone_offset)
+
+
+def user_local_today(user: User) -> str:
+    return user_local_datetime(user).date().isoformat()
+
+
+def delivery_hour(value: int | None, default: int) -> int:
+    if value is None:
+        return default
+    return value if 0 <= value <= 23 else default
+
+
+def timezone_label(offset: str | None) -> str:
+    offset = offset or DEFAULT_TIMEZONE_OFFSET
+    for value, label in TIMEZONE_OPTIONS:
+        if value == offset:
+            return label
+    return f"UTC{offset}"
+
+
+def is_delivery_due(user: User, last_sent_date: str | None, target_hour: int) -> bool:
+    local_now = user_local_datetime(user)
+    return local_now.hour >= target_hour and last_sent_date != local_now.date().isoformat()
 
 
 def is_admin(user_id: int | None) -> bool:
@@ -330,6 +398,22 @@ def get_level(user_id: int) -> str:
 def get_words_per_day(user_id: int) -> int | None:
     user = get_user(user_id)
     return user.words_per_day if user else None
+
+
+def get_delivery_settings(user_id: int) -> dict:
+    user = get_user(user_id)
+    if not user:
+        return {
+            "timezone_offset": DEFAULT_TIMEZONE_OFFSET,
+            "vocab_hour": DAILY_VOCAB_HOUR,
+            "mistake_hour": DAILY_MISTAKE_HOUR,
+        }
+
+    return {
+        "timezone_offset": user.timezone_offset or DEFAULT_TIMEZONE_OFFSET,
+        "vocab_hour": delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR),
+        "mistake_hour": delivery_hour(user.mistake_hour, DAILY_MISTAKE_HOUR),
+    }
 
 
 def get_current_topic_number(user_id: int) -> int:
@@ -643,12 +727,102 @@ def get_due_mistakes(user_id: int, limit: int = 5) -> list[dict]:
         db.close()
 
 
-def update_mistake_result(mistake_id: int, is_correct: bool | None) -> None:
+def get_random_active_mistake(user_id: int) -> dict | None:
+    mistakes = [
+        mistake
+        for mistake in get_due_mistakes(user_id, limit=50)
+        if mistake.get("options")
+    ]
+    if not mistakes:
+        return None
+    return random.choice(mistakes)
+
+
+def get_mistake_by_id(user_id: int, mistake_id: int) -> dict | None:
+    db = SessionLocal()
+    try:
+        row = (
+            db.query(UserMistake)
+            .filter(
+                UserMistake.id == mistake_id,
+                UserMistake.telegram_id == user_id,
+                UserMistake.status == "active",
+            )
+            .first()
+        )
+        if not row:
+            return None
+
+        return {
+            "id": row.id,
+            "level": row.level,
+            "source": row.source,
+            "topic": row.topic,
+            "question": row.question,
+            "options": decode_options(row.options),
+            "correct_answer": row.correct_answer,
+            "explanation": row.explanation,
+            "correct_streak": row.correct_streak or 0,
+        }
+    finally:
+        db.close()
+
+
+def get_active_mistakes_count(user_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "active")
+            .count()
+        )
+    finally:
+        db.close()
+
+
+def get_mastered_mistakes_count(user_id: int) -> int:
+    db = SessionLocal()
+    try:
+        return (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "mastered")
+            .count()
+        )
+    finally:
+        db.close()
+
+
+def get_mastered_mistakes(user_id: int, page: int = 0, page_size: int = MASTERED_MISTAKES_PAGE_SIZE) -> list[dict]:
+    page = max(page, 0)
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "mastered")
+            .order_by(UserMistake.last_seen_at.desc(), UserMistake.id.desc())
+            .offset(page * page_size)
+            .limit(page_size)
+            .all()
+        )
+        return [
+            {
+                "topic": row.topic,
+                "question": row.question,
+                "correct_answer": row.correct_answer,
+                "last_seen_at": row.last_seen_at,
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
+def update_mistake_result(mistake_id: int, is_correct: bool | None) -> tuple[int, str] | None:
     db = SessionLocal()
     try:
         mistake = db.query(UserMistake).filter(UserMistake.id == mistake_id).first()
         if not mistake:
-            return
+            return None
 
         mistake.seen_count = (mistake.seen_count or 0) + 1
         mistake.last_seen_at = now_key()
@@ -658,7 +832,9 @@ def update_mistake_result(mistake_id: int, is_correct: bool | None) -> None:
                 mistake.status = "mastered"
         elif is_correct is False:
             mistake.correct_streak = 0
+        result = (mistake.correct_streak or 0, mistake.status)
         db.commit()
+        return result
     finally:
         db.close()
 
@@ -689,23 +865,127 @@ def format_mistake_question(mistake: dict, index: int, total: int) -> str:
     return text
 
 
+def format_mistake_reminder(mistake: dict) -> str:
+    topic = format_topic_title(mistake.get("topic") or "ошибка")
+    options = mistake.get("options") or []
+    options_text = ""
+
+    if options:
+        labels = ["A", "B", "C", "D"]
+        options_text = "\n\n" + "\n".join(
+            f"{labels[index]}) {option}"
+            for index, option in enumerate(options[:4])
+        )
+
+    return (
+        "Пора исправлять ошибки!\n\n"
+        f"Тема: {topic}\n\n"
+        f"{mistake['question']}"
+        f"{options_text}\n\n"
+        "Выберите вариант. Если ответите правильно, это зачтётся как одна успешная проверка."
+    )
+
+
+def mistake_reminder_kb(mistake: dict):
+    options = mistake.get("options") or []
+    labels = ["A", "B", "C", "D"]
+    rows = [
+        [InlineKeyboardButton(text=labels[index], callback_data=f"daily_mistake_answer:{mistake['id']}:{index}")]
+        for index, _ in enumerate(options[:4])
+    ]
+    rows.append([InlineKeyboardButton(text="✍️ Открыть тренировку", callback_data="mode_practice")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        *rows,
+    ])
+
+
+def mistake_reminder_after_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✍️ Открыть тренировку", callback_data="mode_practice")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
 def build_mistake_feedback(mistake: dict, is_correct: bool | None = None) -> str:
     if is_correct is True:
-        title = "✅ Верно."
-    elif is_correct is False:
-        title = "❌ Пока нет."
+        return "✅ Верно."
+
+    if is_correct is False:
+        title = "❌ Пока нет. Вот как правильно."
     else:
-        title = "Сверьте с исправлением."
+        title = "Сверьте с исправлением и запомните правило."
 
     explanation = mistake.get("explanation") or "Повторите это место и попробуйте похожее задание позже."
     correct = mistake.get("correct_answer")
     correct_text = f"\nПравильно: {correct}" if correct else ""
-    return f"{title}{correct_text}\n\n{explanation}"
+    return f"{title}{correct_text}\n\nРазбор:\n{explanation}"
+
+
+def build_mistake_result_text(mistake: dict, is_correct: bool, result: tuple[int, str] | None) -> str:
+    base = build_mistake_feedback(mistake, is_correct)
+    if not result:
+        return base
+
+    streak, status = result
+    if status == "mastered":
+        return (
+            f"{base}\n\n"
+            "Готово: ошибка исправлена и больше не будет попадаться в активной тренировке."
+        )
+    if is_correct:
+        return (
+            f"{base}\n\n"
+            f"Зачёт: {streak}/2. Нужна ещё одна успешная проверка, и ошибка уйдёт из активных."
+        )
+    return (
+        f"{base}\n\n"
+        "Серия сброшена. Эта ошибка ещё появится в тренировке."
+    )
 
 
 def is_ai_check_correct(feedback: str) -> bool:
     first_line = next((line.strip().lower() for line in (feedback or "").splitlines() if line.strip()), "")
     return "result: correct" in first_line
+
+
+def build_placement_test() -> list[dict]:
+    questions = []
+    for level, count in PLACEMENT_TEST_PLAN:
+        for question in get_level_test(level, count):
+            question["test_level"] = level
+            questions.append(question)
+    return questions
+
+
+def determine_placement_level(questions: list[dict], answers: list[int]) -> tuple[str, dict[str, int], dict[str, int]]:
+    scores = {level: 0 for level, _ in PLACEMENT_TEST_PLAN}
+    totals = {level: 0 for level, _ in PLACEMENT_TEST_PLAN}
+
+    for question, selected_index in zip(questions, answers):
+        level = question.get("test_level", "A1")
+        totals[level] = totals.get(level, 0) + 1
+        if selected_index == question["correct_index"]:
+            scores[level] = scores.get(level, 0) + 1
+
+    if scores.get("A1", 0) < 1:
+        return "A1", scores, totals
+    if scores.get("A2", 0) < 1:
+        return "A1", scores, totals
+    if scores.get("B1", 0) < 2:
+        return "A2", scores, totals
+    if scores.get("B2", 0) < 1:
+        return "B1", scores, totals
+    if scores.get("C1", 0) < 1:
+        return "B2", scores, totals
+    return "C1", scores, totals
+
+
+def format_placement_scores(scores: dict[str, int], totals: dict[str, int]) -> str:
+    return "\n".join(
+        f"• {level}: {scores.get(level, 0)}/{totals.get(level, 0)}"
+        for level, _ in PLACEMENT_TEST_PLAN
+    )
 
 
 def get_roadmap_snapshot(user: User) -> dict:
@@ -748,6 +1028,7 @@ def build_roadmap_text(user_id: int) -> str:
     if not snapshot["current_topic"]:
         return (
             "🗺 План обучения\n\n"
+            "Это основной путь бота: идёте по темам уровня, а ошибки потом попадают в тренировку.\n\n"
             f"Уровень: {snapshot['label']}\n"
             f"Прогресс: {done}/{total} тем • 100%\n"
             f"{progress_bar(done, total)}\n\n"
@@ -761,6 +1042,7 @@ def build_roadmap_text(user_id: int) -> str:
         )
         return (
             "🗺 План обучения\n\n"
+            "Это основной путь бота: учим темы по порядку и возвращаем ошибки в тренировку.\n\n"
             f"Уровень: {snapshot['label']}\n"
             f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
             f"{progress_bar(done, total)}\n\n"
@@ -783,6 +1065,7 @@ def build_roadmap_text(user_id: int) -> str:
 
     return (
         "🗺 План обучения\n\n"
+        "Это основной путь бота: проходите темы по уровню, а тренировка потом повторяет ваши ошибки.\n\n"
         f"Уровень: {snapshot['label']}\n"
         f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
         f"{progress_bar(done, total)}\n\n"
@@ -890,17 +1173,40 @@ def build_main_menu_text(user_id: int) -> str:
     roadmap_status = get_roadmap_status_text(user_id)
     plan = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
+    mastered_count = get_mastered_mistakes_count(user_id)
 
     return (
         "✨ English Hub\n"
-        "Самый простой старт — «План обучения». Если есть конкретный вопрос, выберите «Разбор темы».\n\n"
+        "Как учиться: «План обучения» — основной путь, «Тренировка» — повтор ваших ошибок, «Разбор темы» — помощь по конкретному вопросу.\n\n"
         "Ваш прогресс\n"
         f"• Тариф: {plan}\n"
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
         f"• Словарь: {words_text}\n"
-        f"• План обучения: {roadmap_status}\n\n"
+        f"• План обучения: {roadmap_status}\n"
+        f"• Исправлено ошибок: {mastered_count}\n\n"
         f"💡 {get_phrase()}"
+    )
+
+
+def build_learning_guide_text(user_id: int) -> str:
+    mastered_count = get_mastered_mistakes_count(user_id)
+    delivery = get_delivery_settings(user_id)
+    zone_label = timezone_label(delivery["timezone_offset"])
+    return (
+        "ℹ️ Как учиться в этом боте\n\n"
+        "0. Входная диагностика\n"
+        "При первом запуске бот задаёт короткий тест и ставит стартовый уровень.\n\n"
+        "1. План обучения\n"
+        "Основной путь. Бот ведёт по темам уровня, даёт теорию и короткий тест.\n\n"
+        "2. Тренировка\n"
+        "Повторяет ваши старые ошибки из плана, тестов и прошлых заданий. Это главный режим закрепления.\n"
+        f"Уже исправлено ошибок: {mastered_count}.\n"
+        f"Ошибка дня приходит после {delivery['mistake_hour']:02d}:00 по вашему местному времени ({zone_label}).\n\n"
+        "3. Разбор темы\n"
+        "Для разового вопроса: когда нужно понять конкретное правило или пример.\n\n"
+        "4. Шпаргалка и слова\n"
+        "Помогают быстро вспомнить тему и расширить словарь."
     )
 
 
@@ -917,7 +1223,7 @@ def build_learning_menu_text() -> str:
 def build_practice_menu_text() -> str:
     return (
         "✍️ Тренировка\n"
-        "Здесь ученик уже отвечает сам, а бот проверяет ошибки.\n\n"
+        "Это режим закрепления, а не основной урок.\n\n"
         "• Работа над вашими ошибками — без нового AI-запроса\n"
         "• Если ошибок пока нет — обычная тренировка по теме\n"
         "• План обучения — теория и короткие тесты по уровню"
@@ -940,6 +1246,8 @@ def build_settings_menu_text(user_id: int) -> str:
     words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
     plan = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
+    delivery = get_delivery_settings(user_id)
+    zone_label = timezone_label(delivery["timezone_offset"])
 
     return (
         "⚙️ Профиль и настройки\n"
@@ -947,9 +1255,56 @@ def build_settings_menu_text(user_id: int) -> str:
         f"• Тариф: {plan}\n"
         f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
-        f"• Словарь: {words_text}\n\n"
+        f"• Словарь: {words_text}\n"
+        f"• Ваше время: {zone_label}\n"
+        f"• Слова: {delivery['vocab_hour']:02d}:00\n"
+        f"• Ошибки: {delivery['mistake_hour']:02d}:00\n\n"
         f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
         "Здесь можно поменять уровень и открыть справку."
+    )
+
+
+def build_delivery_settings_text(user_id: int) -> str:
+    delivery = get_delivery_settings(user_id)
+    zone_label = timezone_label(delivery["timezone_offset"])
+    return (
+        "⏰ Рассылка\n\n"
+        "Выберите город или регион с таким же временем, как у вас. Тогда бот будет присылать сообщения по вашему местному времени.\n\n"
+        f"• Ваше время: {zone_label}\n"
+        f"• Технически: UTC{delivery['timezone_offset']}\n"
+        f"• Слова на день: {delivery['vocab_hour']:02d}:00\n"
+        f"• Ошибка дня: {delivery['mistake_hour']:02d}:00"
+    )
+
+
+def build_mastered_mistakes_text(user_id: int, page: int = 0) -> str:
+    total = get_mastered_mistakes_count(user_id)
+    page = normalize_mastered_mistakes_page(page, total)
+    if total == 0:
+        return (
+            "✅ Исправленные ошибки\n\n"
+            "Пока здесь пусто.\n\n"
+            "Ошибка попадёт сюда после двух успешных проверок: например, один раз в рассылке и ещё раз в тренировке."
+        )
+
+    mistakes = get_mastered_mistakes(user_id, page)
+    lines = []
+    for index, mistake in enumerate(mistakes, start=1):
+        item_number = page * MASTERED_MISTAKES_PAGE_SIZE + index
+        topic = format_topic_title(mistake["topic"] or "ошибка")
+        correct = mistake["correct_answer"] or "исправлено"
+        lines.append(
+            f"{item_number}. {topic}\n"
+            f"   {mistake['question']}\n"
+            f"   Правильно: {correct}"
+        )
+
+    total_pages = mastered_mistakes_total_pages(total)
+    return (
+        "✅ Исправленные ошибки\n\n"
+        f"Всего исправлено: {total}\n"
+        f"Страница: {page + 1}/{total_pages}\n\n"
+        + "\n\n".join(lines)
     )
 
 
@@ -974,6 +1329,7 @@ def build_premium_text(user_id: int) -> str:
 def main_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [
             InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
             InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice"),
@@ -1009,6 +1365,7 @@ def practice_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice")],
         [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -1035,9 +1392,74 @@ def settings_menu(user_id: int):
             InlineKeyboardButton(text="🎯 Уровень", callback_data="change_level"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
         ],
+        [InlineKeyboardButton(text="⏰ Рассылка", callback_data="delivery_settings")],
+        [InlineKeyboardButton(text="✅ Исправленные ошибки", callback_data="mastered_mistakes")],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
+
+
+def delivery_settings_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Время словаря", callback_data="delivery_vocab_hour")],
+        [InlineKeyboardButton(text="✍️ Время ошибок", callback_data="delivery_mistake_hour")],
+        [InlineKeyboardButton(text="🌍 Часовой пояс", callback_data="delivery_timezone")],
+        [InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def mastered_mistakes_total_pages(total: int) -> int:
+    return max((total - 1) // MASTERED_MISTAKES_PAGE_SIZE + 1, 1)
+
+
+def normalize_mastered_mistakes_page(page: int, total: int) -> int:
+    total_pages = mastered_mistakes_total_pages(total)
+    return min(max(page, 0), total_pages - 1)
+
+
+def mastered_mistakes_kb(page: int, total: int):
+    page = normalize_mastered_mistakes_page(page, total)
+    total_pages = mastered_mistakes_total_pages(total)
+    rows = []
+    nav = []
+
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="◀️ Назад", callback_data=f"mastered_mistakes:{page - 1}"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton(text="Вперёд ▶️", callback_data=f"mastered_mistakes:{page + 1}"))
+    if nav:
+        rows.append(nav)
+
+    rows.append([InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def delivery_hour_kb(kind: str, current_hour: int):
+    rows = []
+    row = []
+    for hour in DELIVERY_HOURS:
+        prefix = "✅ " if hour == current_hour else ""
+        row.append(InlineKeyboardButton(text=f"{prefix}{hour:02d}:00", callback_data=f"set_{kind}_hour:{hour}"))
+        if len(row) == 3:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="delivery_settings")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def delivery_timezone_kb(current_offset: str):
+    rows = []
+    for offset, label in TIMEZONE_OPTIONS:
+        prefix = "✅ " if offset == current_offset else ""
+        rows.append([InlineKeyboardButton(text=f"{prefix}{label}", callback_data=f"set_timezone:{offset}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="delivery_settings")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def premium_kb():
@@ -1056,6 +1478,7 @@ def roadmap_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Начать урок", callback_data="roadmap_start")],
         [InlineKeyboardButton(text="🧭 Список тем", callback_data="roadmap_topics")],
+        [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [InlineKeyboardButton(text="🔄 Сбросить прогресс", callback_data="roadmap_reset_confirm")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -1152,6 +1575,7 @@ class Registration(StatesGroup):
     name = State()
     birthdate = State()
     frequency = State()
+    placement = State()
 
 
 class StudyFlow(StatesGroup):
@@ -1213,18 +1637,14 @@ async def main():
             reply_markup=main_menu(message.from_user.id),
         )
 
-    async def show_help(message: Message):
+    async def show_help(message: Message, user_id: int | None = None):
+        guide_user_id = user_id or message.from_user.id
         await message.answer(
             "❔ Как пользоваться\n\n"
             "1. Нажмите кнопку в главном меню.\n"
             "2. Если бот просит тему, напишите её обычным текстом.\n"
-            "3. Если бот дал задание, отправьте ответ одним сообщением.\n\n"
-            "Что выбрать:\n"
-            "• План обучения — основной путь по уровню\n"
-            "• Разбор темы — когда хотите понять конкретное правило\n"
-            "• Тренировка — повтор ошибок из плана и прошлых заданий\n"
-            "• Шпаргалка — когда нужна короткая памятка\n"
-            "• Слова на день — ежедневный словарь\n\n"
+            "3. Если бот дал задание, выберите вариант кнопкой или отправьте ответ текстом.\n\n"
+            f"{build_learning_guide_text(guide_user_id)}\n\n"
             "Команды: /start, /help, /cancel, /premium"
         )
 
@@ -1380,8 +1800,10 @@ async def main():
         questions = data["level_questions"]
         index = data["level_index"]
         question = questions[index]
+        test_kind = data.get("test_kind")
+        title = "Диагностика" if test_kind == "placement" else "Вопрос"
         await message.answer(
-            f"🧪 Вопрос {index + 1}/5\n\n{question['question']}",
+            f"🧪 {title} {index + 1}/{len(questions)}\n\n{question['question']}",
             reply_markup=level_question_kb(question),
         )
 
@@ -1457,8 +1879,9 @@ async def main():
             if not user or not user.words_per_day:
                 return False
 
-            today = today_key()
-            if not force and user.last_vocab_sent_date == today:
+            today = user_local_today(user)
+            vocab_hour = delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR)
+            if not force and not is_delivery_due(user, user.last_vocab_sent_date, vocab_hour):
                 return False
 
             user_is_premium = is_premium_user(user)
@@ -1521,22 +1944,71 @@ async def main():
         finally:
             db.close()
 
+    async def send_daily_mistake(bot: Bot, user_id: int) -> bool:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user:
+                return False
+
+            today = user_local_today(user)
+            mistake_hour = delivery_hour(user.mistake_hour, DAILY_MISTAKE_HOUR)
+            if not is_delivery_due(user, user.last_mistake_sent_date, mistake_hour):
+                return False
+        finally:
+            db.close()
+
+        mistake = get_random_active_mistake(user_id)
+        if not mistake:
+            return False
+
+        await bot.send_message(
+            user_id,
+            format_mistake_reminder(mistake),
+            reply_markup=mistake_reminder_kb(mistake),
+        )
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if user:
+                user.last_mistake_sent_date = user_local_today(user)
+                db.commit()
+            return True
+        finally:
+            db.close()
+
     async def vocab_daily_loop(bot: Bot):
         while True:
             try:
-                now = datetime.now()
-                if now.hour >= DAILY_VOCAB_HOUR:
-                    db = SessionLocal()
-                    users = db.query(User).all()
-                    db.close()
+                db = SessionLocal()
+                users = db.query(User).all()
+                db.close()
 
-                    for user in users:
-                        try:
-                            await send_vocab_words(bot, user.telegram_id)
-                        except Exception as exc:
-                            logging.exception("Failed to send daily vocabulary to %s: %s", user.telegram_id, exc)
+                for user in users:
+                    try:
+                        await send_vocab_words(bot, user.telegram_id)
+                    except Exception as exc:
+                        logging.exception("Failed to send daily vocabulary to %s: %s", user.telegram_id, exc)
             except Exception as exc:
                 logging.exception("Vocabulary daily loop failed: %s", exc)
+
+            await asyncio.sleep(3600)
+
+    async def mistake_daily_loop(bot: Bot):
+        while True:
+            try:
+                db = SessionLocal()
+                users = db.query(User).all()
+                db.close()
+
+                for user in users:
+                    try:
+                        await send_daily_mistake(bot, user.telegram_id)
+                    except Exception as exc:
+                        logging.exception("Failed to send daily mistake to %s: %s", user.telegram_id, exc)
+            except Exception as exc:
+                logging.exception("Mistake daily loop failed: %s", exc)
 
             await asyncio.sleep(3600)
 
@@ -1654,10 +2126,10 @@ async def main():
         options = mistake.get("options") or []
         correct_answer = mistake.get("correct_answer")
         is_correct = 0 <= selected_index < len(options) and options[selected_index] == correct_answer
-        update_mistake_result(mistake["id"], is_correct)
+        result = update_mistake_result(mistake["id"], is_correct)
         results.append("correct" if is_correct else "wrong")
         await call.message.edit_reply_markup(reply_markup=None)
-        await call.message.answer(build_mistake_feedback(mistake, is_correct))
+        await call.message.answer(build_mistake_result_text(mistake, is_correct, result))
 
         index += 1
         await state.update_data(mistake_index=index, mistake_results=results)
@@ -1665,6 +2137,30 @@ async def main():
             await send_mistake_training_question(call.message, state)
         else:
             await finish_mistake_training(call.message, state, call.from_user.id)
+
+    async def handle_daily_mistake_answer(call: CallbackQuery):
+        parts = call.data.split(":")
+        if len(parts) != 3:
+            await call.answer()
+            return
+
+        mistake_id = int(parts[1])
+        selected_index = int(parts[2])
+        mistake = get_mistake_by_id(call.from_user.id, mistake_id)
+        if not mistake:
+            await call.message.edit_reply_markup(reply_markup=None)
+            await call.message.answer("Эта ошибка уже закрыта или больше не активна.", reply_markup=main_menu(call.from_user.id))
+            return
+
+        options = mistake.get("options") or []
+        correct_answer = mistake.get("correct_answer")
+        is_correct = 0 <= selected_index < len(options) and options[selected_index] == correct_answer
+        result = update_mistake_result(mistake_id, is_correct)
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer(
+            build_mistake_result_text(mistake, is_correct, result),
+            reply_markup=mistake_reminder_after_kb(),
+        )
 
     async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int):
         db = SessionLocal()
@@ -1971,6 +2467,46 @@ Mistakes:
             reply_markup=main_menu(call.from_user.id),
         )
 
+    async def finish_placement_test(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        questions = data.get("level_questions") or []
+        answers = data.get("level_answers") or []
+        level, scores, totals = determine_placement_level(questions, answers)
+
+        for question, selected_index in zip(questions, answers):
+            if selected_index != question["correct_index"]:
+                save_user_mistake(
+                    call.from_user.id,
+                    question.get("test_level", level),
+                    "placement",
+                    question["topic"],
+                    question["question"],
+                    correct_answer=question["answer"],
+                    explanation=f"Ошибка во входной диагностике. Правильный ответ: {question['answer']}",
+                    options=question["options"],
+                )
+
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+            if user:
+                user.level = level
+                user.current_topic_index = 0
+                user.roadmap_review_index = 0
+                user.last_result = ""
+                db.commit()
+        finally:
+            db.close()
+
+        await state.clear()
+        await call.message.answer(
+            "✅ Диагностика завершена.\n\n"
+            f"Стартовый уровень: {level_label(level)}\n\n"
+            f"Результаты:\n{format_placement_scores(scores, totals)}\n\n"
+            "Дальше лучше начать с «Плана обучения». Ошибки из диагностики уже добавлены в тренировку.",
+            reply_markup=main_menu(call.from_user.id),
+        )
+
     @dp.message(Registration.name)
     async def reg_name(message: Message, state: FSMContext):
         name = (message.text or "").strip()
@@ -2041,6 +2577,10 @@ Mistakes:
                 last_result="",
                 words_per_day=None,
                 last_vocab_sent_date="",
+                last_mistake_sent_date="",
+                timezone_offset=DEFAULT_TIMEZONE_OFFSET,
+                vocab_hour=DAILY_VOCAB_HOUR,
+                mistake_hour=DAILY_MISTAKE_HOUR,
                 premium_until="",
                 ai_requests_date="",
                 ai_requests_count=0,
@@ -2053,13 +2593,20 @@ Mistakes:
         finally:
             db.close()
 
-        await state.clear()
+        questions = build_placement_test()
+        await state.set_state(Registration.placement)
+        await state.update_data(
+            level_questions=questions,
+            level_index=0,
+            level_answers=[],
+            test_kind="placement",
+        )
         await call.message.edit_text(
             f"✨ Добро пожаловать, {name}!\n\n"
-            f"Стартовый уровень: {level_label(DEFAULT_LEVEL)}\n"
-            "Откройте меню ниже и выберите нужный блок.",
-            reply_markup=main_menu(call.from_user.id),
+            "Сейчас пройдём короткую диагностику: 8 вопросов с вариантами ответа.\n"
+            "Это поможет поставить стартовый уровень и собрать первые темы для тренировки."
         )
+        await send_level_question(call.message, state)
 
     @dp.message(CommandStart())
     async def start(message: Message, state: FSMContext):
@@ -2071,7 +2618,7 @@ Mistakes:
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message):
-        await show_help(message)
+        await show_help(message, message.from_user.id)
 
     @dp.message(Command("cancel"))
     async def cancel_cmd(message: Message, state: FSMContext):
@@ -2153,7 +2700,10 @@ Mistakes:
             return
 
         if data == "help":
-            await show_help(call.message)
+            await show_help(call.message, call.from_user.id)
+
+        elif data == "learning_guide":
+            await call.message.answer(build_learning_guide_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
 
         elif data == "premium":
             await show_premium(call.message, call.from_user.id)
@@ -2169,6 +2719,84 @@ Mistakes:
 
         elif data == "premium_request":
             await notify_admin_about_premium_request(bot, call.message, call.from_user)
+
+        elif data == "delivery_settings":
+            await call.message.edit_text(
+                build_delivery_settings_text(call.from_user.id),
+                reply_markup=delivery_settings_kb(),
+            )
+
+        elif data == "mastered_mistakes" or data.startswith("mastered_mistakes:"):
+            page = 0
+            if ":" in data:
+                try:
+                    page = int(data.split(":", 1)[1])
+                except ValueError:
+                    page = 0
+            total = get_mastered_mistakes_count(call.from_user.id)
+            page = normalize_mastered_mistakes_page(page, total)
+            await call.message.edit_text(
+                build_mastered_mistakes_text(call.from_user.id, page),
+                reply_markup=mastered_mistakes_kb(page, total),
+            )
+
+        elif data == "delivery_vocab_hour":
+            delivery = get_delivery_settings(call.from_user.id)
+            await call.message.edit_text(
+                "✨ Выберите время прихода словаря.\nВремя считается по вашему часовому поясу.",
+                reply_markup=delivery_hour_kb("vocab", delivery["vocab_hour"]),
+            )
+
+        elif data == "delivery_mistake_hour":
+            delivery = get_delivery_settings(call.from_user.id)
+            await call.message.edit_text(
+                "✍️ Выберите время прихода ошибки дня.\nВремя считается по вашему часовому поясу.",
+                reply_markup=delivery_hour_kb("mistake", delivery["mistake_hour"]),
+            )
+
+        elif data == "delivery_timezone":
+            delivery = get_delivery_settings(call.from_user.id)
+            await call.message.edit_text(
+                "🌍 Выберите город или регион, где сейчас такое же время, как у вас.\n\n"
+                "Если вашего города нет, выберите ближайший похожий вариант.",
+                reply_markup=delivery_timezone_kb(delivery["timezone_offset"]),
+            )
+
+        elif data.startswith("set_vocab_hour:"):
+            hour = int(data.split(":", 1)[1])
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if user:
+                    user.vocab_hour = hour
+                    db.commit()
+            finally:
+                db.close()
+            await call.message.edit_text(build_delivery_settings_text(call.from_user.id), reply_markup=delivery_settings_kb())
+
+        elif data.startswith("set_mistake_hour:"):
+            hour = int(data.split(":", 1)[1])
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if user:
+                    user.mistake_hour = hour
+                    db.commit()
+            finally:
+                db.close()
+            await call.message.edit_text(build_delivery_settings_text(call.from_user.id), reply_markup=delivery_settings_kb())
+
+        elif data.startswith("set_timezone:"):
+            offset = data.split(":", 1)[1]
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if user:
+                    user.timezone_offset = offset
+                    db.commit()
+            finally:
+                db.close()
+            await call.message.edit_text(build_delivery_settings_text(call.from_user.id), reply_markup=delivery_settings_kb())
 
         elif data == "roadmap_start":
             await send_roadmap_lesson(call.message, state, call.from_user.id)
@@ -2189,6 +2817,9 @@ Mistakes:
 
         elif data.startswith("mistake_answer:"):
             await handle_mistake_answer(call, state)
+
+        elif data.startswith("daily_mistake_answer:"):
+            await handle_daily_mistake_answer(call)
 
         elif data == "roadmap_reset_confirm":
             await call.message.answer(
@@ -2216,7 +2847,12 @@ Mistakes:
                 return
 
             await state.set_state(LevelChangeFlow.testing)
-            await state.update_data(level_questions=get_level_test(target_level), level_index=0, level_answers=[])
+            await state.update_data(
+                level_questions=get_level_test(target_level),
+                level_index=0,
+                level_answers=[],
+                test_kind="level_change",
+            )
             await call.message.edit_text(f"🧪 Тест на уровень {level_label(target_level)}")
             await send_level_question(call.message, state)
 
@@ -2237,7 +2873,10 @@ Mistakes:
             await call.message.edit_reply_markup(reply_markup=None)
 
             if index >= len(questions):
-                await finish_level_test(call, state)
+                if state_data.get("test_kind") == "placement":
+                    await finish_placement_test(call, state)
+                else:
+                    await finish_level_test(call, state)
             else:
                 await send_level_question(call.message, state)
 
@@ -2492,6 +3131,7 @@ Mistakes:
         )
 
     asyncio.create_task(vocab_daily_loop(bot))
+    asyncio.create_task(mistake_daily_loop(bot))
     await notify_bot_started(bot)
     await dp.start_polling(bot)
 
