@@ -74,6 +74,7 @@ FREE_MAX_WORDS_PER_DAY = 3
 PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 ROADMAP_REVIEW_INTERVAL = 3
+ROADMAP_CACHE_VERSION = "v2"
 MASTERED_MISTAKES_PAGE_SIZE = 5
 PLACEMENT_TEST_PLAN = [
     ("A1", 2),
@@ -488,6 +489,31 @@ def split_roadmap_lesson(text: str) -> dict:
     return sections
 
 
+def is_clear_roadmap_quiz_question(question_text: str, options: list[str]) -> bool:
+    question = re.sub(r"\s+", " ", (question_text or "").strip().lower())
+    clean_options = [re.sub(r"\s+", " ", option.strip().lower()) for option in options]
+    vague_patterns = [
+        "о ком говорится",
+        "мужчина или женщина",
+        "кто это",
+        "что выбрать",
+        "угадай",
+    ]
+    if any(pattern in question for pattern in vague_patterns):
+        return False
+
+    generic_questions = {
+        "choose the best option",
+        "choose the correct option",
+        "выберите правильный вариант",
+        "какой вариант правильный",
+    }
+    if question in generic_questions and all(len(option.split()) <= 4 for option in clean_options):
+        return False
+
+    return True
+
+
 def parse_roadmap_quiz(text: str) -> list[dict]:
     questions = []
     for block in re.findall(r"(?ms)^\s*Q\d+:\s*(.*?)(?=^\s*Q\d+:\s*|\Z)", text or ""):
@@ -510,6 +536,8 @@ def parse_roadmap_quiz(text: str) -> list[dict]:
         explanation_match = re.search(r"(?mis)^\s*EXPLANATION:\s*(.*?)\s*$", block)
 
         if not question_text or len(options) < 2 or not answer_match:
+            continue
+        if not is_clear_roadmap_quiz_question(question_text, options):
             continue
 
         correct_label = answer_match.group(1).upper()
@@ -574,9 +602,30 @@ def build_roadmap_quiz_summary(questions: list[dict], answers: list[int]) -> tup
     return summary, passed
 
 
+def build_roadmap_wrong_answer_text(question: dict, selected_index: int) -> str:
+    labels = ["A", "B", "C", "D"]
+    options = question.get("options") or []
+    correct_index = question["correct_index"]
+    selected = options[selected_index] if 0 <= selected_index < len(options) else "нет ответа"
+    correct = options[correct_index] if 0 <= correct_index < len(options) else ""
+    selected_label = labels[selected_index] if 0 <= selected_index < len(labels) else "?"
+    correct_label = labels[correct_index] if 0 <= correct_index < len(labels) else "?"
+    explanation = (question.get("explanation") or "").strip()
+    explanation_text = f"\n\nПочему так:\n{explanation}" if explanation else ""
+
+    return (
+        "❌ Здесь ошибка, лучше вернуться к теории.\n\n"
+        f"Вопрос:\n{question['question']}\n\n"
+        f"Ваш ответ: {selected_label}) {selected}\n"
+        f"Правильно: {correct_label}) {correct}"
+        f"{explanation_text}\n\n"
+        "Что делаем дальше?"
+    )
+
+
 def build_roadmap_cache_key(level: str, lesson_type: str, topic: str, simplify: bool) -> str:
     normalized_topic = re.sub(r"\s+", " ", (topic or "").strip().lower())
-    return f"{normalize_level(level)}:{lesson_type}:{int(simplify)}:{normalized_topic}"
+    return f"{ROADMAP_CACHE_VERSION}:{normalize_level(level)}:{lesson_type}:{int(simplify)}:{normalized_topic}"
 
 
 def get_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool) -> str | None:
@@ -947,6 +996,155 @@ def build_mistake_result_text(mistake: dict, is_correct: bool, result: tuple[int
 def is_ai_check_correct(feedback: str) -> bool:
     first_line = next((line.strip().lower() for line in (feedback or "").splitlines() if line.strip()), "")
     return "result: correct" in first_line
+
+
+def extract_json_object(text: str) -> dict | None:
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        data = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def has_cyrillic(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-яЁё]", text or ""))
+
+
+def parse_practice_bundle(raw_answer: str, topic: str) -> dict:
+    data = extract_json_object(raw_answer) or {}
+    raw_tasks = data.get("tasks") if isinstance(data.get("tasks"), list) else []
+    tasks = []
+
+    for raw_task in raw_tasks[:5]:
+        if not isinstance(raw_task, dict):
+            continue
+
+        question = str(raw_task.get("question") or "").strip()
+        correct_answer = str(raw_task.get("correct_answer") or "").strip()
+        if not question or not correct_answer:
+            continue
+
+        options = raw_task.get("options") if isinstance(raw_task.get("options"), list) else []
+        acceptable_answers = raw_task.get("acceptable_answers")
+        if not isinstance(acceptable_answers, list):
+            acceptable_answers = []
+
+        clean_options = [str(option).strip() for option in options if str(option).strip()]
+        clean_answers = [
+            str(answer).strip()
+            for answer in acceptable_answers
+            if str(answer).strip()
+        ]
+        visible_text = " ".join([question, correct_answer, *clean_options, *clean_answers])
+        if has_cyrillic(visible_text):
+            continue
+
+        tasks.append({
+            "type": str(raw_task.get("type") or "practice").strip(),
+            "question": question,
+            "options": clean_options,
+            "correct_answer": correct_answer,
+            "acceptable_answers": clean_answers,
+            "explanation": str(raw_task.get("explanation") or "").strip(),
+        })
+
+    return {
+        "title": str(data.get("title") or f"✍️ Тренировка: {topic}").strip(),
+        "tasks": tasks,
+    }
+
+
+def normalize_practice_answer(answer: str) -> str:
+    answer = (answer or "").strip().lower().replace("ё", "е")
+    answer = re.sub(r"[“”\"`]", "", answer)
+    answer = re.sub(r"\s+", " ", answer)
+    answer = re.sub(r"[.!?,;:]+$", "", answer)
+    return answer.strip()
+
+
+def practice_answer_matches(task: dict, user_answer: str) -> bool:
+    answer = normalize_practice_answer(user_answer)
+    if not answer:
+        return False
+
+    options = task.get("options") or []
+    correct_answer = task.get("correct_answer") or ""
+    if options:
+        labels = ["a", "b", "c", "d"]
+        cyrillic_labels = {"а": "a", "б": "b", "в": "c", "г": "d"}
+        raw_label = (user_answer or "").strip().lower()
+        raw_label = re.sub(r"[\).]$", "", raw_label)
+        raw_label = cyrillic_labels.get(raw_label, raw_label)
+        correct_normalized = normalize_practice_answer(correct_answer)
+        correct_index = next(
+            (
+                index
+                for index, option in enumerate(options[:4])
+                if normalize_practice_answer(option) == correct_normalized
+            ),
+            None,
+        )
+        if correct_index is not None and raw_label == labels[correct_index]:
+            return True
+
+    variants = [correct_answer] + (task.get("acceptable_answers") or [])
+    normalized_variants = {normalize_practice_answer(variant) for variant in variants if variant}
+    if options:
+        answer_without_label = re.sub(r"^[a-dа-г][\).]\s*", "", user_answer or "", flags=re.IGNORECASE)
+        if normalize_practice_answer(answer_without_label) in normalized_variants:
+            return True
+
+    return answer in normalized_variants
+
+
+def format_practice_task(task: dict, index: int, total: int, title: str) -> str:
+    text = f"{title}\n\nЗадание {index + 1}/{total}\n\n{task['question']}"
+    options = task.get("options") or []
+    if options:
+        labels = ["A", "B", "C", "D"]
+        options_text = "\n".join(f"{labels[i]}) {option}" for i, option in enumerate(options[:4]))
+        text += f"\n\n{options_text}"
+
+    hint = "Введите букву или вариант ответа." if options else "Напишите короткий ответ."
+    return f"{text}\n\n{hint}"
+
+
+def build_practice_step_feedback(task: dict, is_correct: bool) -> str:
+    if is_correct:
+        return "✅ Верно."
+
+    explanation = task.get("explanation") or "Посмотрите на правильный вариант и попробуйте заметить правило."
+    return (
+        "❌ Нужно поправить.\n\n"
+        f"Правильно: {task['correct_answer']}\n\n"
+        f"{explanation}"
+    )
+
+
+def build_practice_summary(topic: str, results: list[dict]) -> str:
+    total = len(results)
+    correct = sum(1 for result in results if result.get("is_correct"))
+    lines = []
+    for index, result in enumerate(results, start=1):
+        status = "✅" if result.get("is_correct") else "❌"
+        lines.append(f"{index}. {status} {result.get('question', 'задание')}")
+
+    return (
+        f"✅ Тренировка завершена: {topic}\n\n"
+        f"Верно: {correct}/{total}\n\n"
+        + "\n".join(lines)
+        + "\n\nОшибки, если они были, сохранены для повторения."
+    )
 
 
 def build_placement_test() -> list[dict]:
@@ -1502,6 +1700,13 @@ def roadmap_lesson_step_kb(next_text: str, next_callback: str):
     ])
 
 
+def roadmap_wrong_answer_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Перейти к теории", callback_data="roadmap_theory:0")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
 def yookassa_payment_kb(confirmation_url: str):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="💳 Перейти к оплате", url=confirmation_url)],
@@ -2028,8 +2233,104 @@ async def main():
             reply_markup=cancel_kb(),
         )
 
+    async def start_generated_practice(message: Message, state: FSMContext, user_id: int, topic: str, level: str):
+        if not await ensure_ai_quota(message, user_id):
+            await state.clear()
+            return
+
+        msg = await message.answer("🤖 Собираю тренировку...")
+        asyncio.create_task(delete_later(msg, 5))
+        raw_answer = ask_ai(make_practice_task_prompt(topic, level), level, "practice")
+        bundle = parse_practice_bundle(raw_answer, topic)
+        tasks = bundle["tasks"]
+        if len(tasks) < 5:
+            await state.clear()
+            await message.answer(
+                "Не получилось собрать тренировку в нужном формате. Попробуйте ещё раз.",
+                reply_markup=main_menu(user_id),
+            )
+            return
+
+        await state.update_data(
+            topic=topic,
+            mode="practice",
+            practice_user_id=user_id,
+            practice_topic=topic,
+            practice_level=level,
+            practice_title=bundle["title"],
+            practice_tasks=tasks,
+            practice_index=0,
+            practice_results=[],
+            practice_task=None,
+        )
+        await send_practice_step(message, state)
+
+    async def send_practice_step(message: Message, state: FSMContext):
+        data = await state.get_data()
+        tasks = data.get("practice_tasks") or []
+        index = data.get("practice_index", 0)
+        topic = data.get("practice_topic", "")
+        title = data.get("practice_title") or f"✍️ Тренировка: {topic}"
+
+        if not tasks or index >= len(tasks):
+            results = data.get("practice_results") or []
+            user_id = data.get("practice_user_id") or message.from_user.id
+            await state.clear()
+            await message.answer(build_practice_summary(topic, results), reply_markup=main_menu(user_id))
+            return
+
+        await state.set_state(StudyFlow.waiting_practice_answer)
+        await message.answer(
+            format_practice_task(tasks[index], index, len(tasks), title),
+            reply_markup=cancel_kb(),
+        )
+
+    async def check_generated_practice_answer(message: Message, state: FSMContext, user_answer: str):
+        data = await state.get_data()
+        tasks = data.get("practice_tasks") or []
+        index = data.get("practice_index", 0)
+        topic = data.get("practice_topic", "")
+        level = data.get("practice_level") or level_label(get_level(message.from_user.id))
+
+        if not tasks or index >= len(tasks):
+            await state.clear()
+            await message.answer("Тренировка потерялась. Попробуйте начать заново.", reply_markup=main_menu(message.from_user.id))
+            return
+
+        task = tasks[index]
+        is_correct = practice_answer_matches(task, user_answer)
+        results = data.get("practice_results") or []
+        results.append({
+            "question": task["question"],
+            "is_correct": is_correct,
+        })
+
+        if not is_correct:
+            save_user_mistake(
+                message.from_user.id,
+                get_level(message.from_user.id),
+                "practice",
+                topic,
+                task["question"],
+                options=task.get("options") or None,
+                correct_answer=task["correct_answer"],
+                explanation=task.get("explanation") or "Повторите правильный вариант и попробуйте ещё раз позже.",
+            )
+
+        await message.answer(build_practice_step_feedback(task, is_correct))
+        await state.update_data(
+            practice_index=index + 1,
+            practice_results=results,
+            practice_level=level,
+        )
+        await send_practice_step(message, state)
+
     async def check_practice_answer(message: Message, state: FSMContext, user_answer: str):
         data = await state.get_data()
+        if data.get("practice_tasks"):
+            await check_generated_practice_answer(message, state, user_answer)
+            return
+
         task = data.get("practice_task")
         topic = data.get("practice_topic", "")
         level = data.get("practice_level") or level_label(get_level(message.from_user.id))
@@ -2358,18 +2659,63 @@ async def main():
 
     async def handle_roadmap_quiz_answer(call: CallbackQuery, state: FSMContext):
         data = await state.get_data()
+        topic = data.get("roadmap_topic")
+        roadmap_kind = data.get("roadmap_kind", "topic")
         questions = data.get("roadmap_quiz_questions") or []
         index = data.get("roadmap_quiz_index", 0)
         answers = data.get("roadmap_quiz_answers") or []
 
-        if not questions or index >= len(questions):
+        if not topic or not questions or index >= len(questions):
             await state.clear()
             await call.message.answer("Состояние теста потеряно. Запустите план обучения снова.", reply_markup=main_menu(call.from_user.id))
             return
 
         selected_index = int(call.data.split(":", 1)[1])
+        question = questions[index]
+        correct_index = question["correct_index"]
         answers.append(selected_index)
         await call.message.edit_reply_markup(reply_markup=None)
+
+        if selected_index != correct_index:
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if not user:
+                    await state.clear()
+                    await call.message.answer("User not found. Please use /start first.")
+                    return
+
+                save_user_mistake(
+                    call.from_user.id,
+                    user.level,
+                    roadmap_kind,
+                    topic,
+                    question["question"],
+                    correct_answer=question["options"][correct_index],
+                    explanation=question.get("explanation", ""),
+                    options=question.get("options", []),
+                )
+
+                if roadmap_kind == "review":
+                    user.last_result = "review_wrong"
+                else:
+                    update_progress(user, False)
+                db.commit()
+            finally:
+                db.close()
+
+            await state.update_data(
+                roadmap_quiz_answers=answers,
+                roadmap_quiz_index=index,
+                roadmap_lesson_step="theory",
+                roadmap_theory_index=0,
+            )
+            await state.set_state(StudyFlow.viewing_roadmap_lesson)
+            await call.message.answer(
+                build_roadmap_wrong_answer_text(question, selected_index),
+                reply_markup=roadmap_wrong_answer_kb(),
+            )
+            return
 
         index += 1
         await state.update_data(roadmap_quiz_answers=answers, roadmap_quiz_index=index)
@@ -2979,13 +3325,7 @@ Mistakes:
                 await call.message.answer("Тема потерялась. Попробуйте снова.", reply_markup=main_menu(call.from_user.id))
                 return
 
-            practice_prompt = make_practice_task_prompt(topic, level)
-            if not await ensure_ai_quota(call.message, call.from_user.id):
-                await state.clear()
-                return
-
-            answer = ask_ai(practice_prompt, level, "practice")
-            await send_practice_task(call.message, state, answer, topic, level, "practice")
+            await start_generated_practice(call.message, state, call.from_user.id, topic, level)
 
         elif data.startswith("set_level:"):
             level = normalize_level(data.split(":", 1)[1])
@@ -3030,6 +3370,10 @@ Mistakes:
         data = await state.get_data()
         mode = data.get("mode", "explain")
         level = level_label(get_level(message.from_user.id))
+        if mode == "practice":
+            await start_generated_practice(message, state, message.from_user.id, topic, level)
+            return
+
         if not await ensure_ai_quota(message, message.from_user.id):
             await state.clear()
             return
