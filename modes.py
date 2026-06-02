@@ -1,30 +1,30 @@
 MODES = {
     "explain": {
-        "title": "Explain",
+        "title": "Разбор темы",
         "premium": False,
     },
     "quiz": {
-        "title": "Quiz",
+        "title": "Мини-тест",
         "premium": False,
     },
     "summary": {
-        "title": "Summary",
+        "title": "Шпаргалка",
         "premium": False,
     },
     "practice": {
-        "title": "Practice",
+        "title": "Тренировка",
         "premium": False,
     },
     "chat": {
-        "title": "Chat",
+        "title": "Чат-тренировка",
         "premium": True,
     },
     "roadmap": {
-        "title": "Road map",
+        "title": "План обучения",
         "premium": False,
     },
     "voice": {
-        "title": "Voice",
+        "title": "Голос",
         "premium": True,
     },
 }

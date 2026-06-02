@@ -26,7 +26,7 @@ def make_user_prompt(topic: str, mode: str, level: str) -> str:
 
     if mode == "explain":
         return base + """
-Сделай мини-урок.
+Сделай понятный разбор темы. Это не практика, а объяснение перед практикой.
 
 Формат:
 1. Что это значит
@@ -34,13 +34,14 @@ def make_user_prompt(topic: str, mode: str, level: str) -> str:
 3. Формула или простой шаблон, если тема грамматическая
 4. 4 примера: English -> Russian
 5. Частая ошибка
-6. Мини-задание: 2 коротких пункта без ответов
+6. Как понять, что ученик использует тему правильно
 
 Правила:
 - A1-A2: очень простые слова и короткие предложения
 - B1-B2: добавь больше естественных примеров
 - C1-C2: добавь нюанс, но кратко
-- Не больше 220 слов
+- Не давай задания в конце
+- Не больше 260 слов
 """
 
     if mode == "quiz":
@@ -63,16 +64,18 @@ def make_user_prompt(topic: str, mode: str, level: str) -> str:
 
     if mode == "summary":
         return base + """
-Сделай короткий конспект.
+Сделай короткую шпаргалку. Это справочник, а не урок и не практика.
 
 Формат:
 1. Главное правило в 1-2 предложениях
 2. 3 ключевых примера: English -> Russian
-3. 5 полезных слов или фраз по теме с коротким переводом
-4. Что запомнить
+3. Мини-таблица или список форм, если подходит к теме
+4. 5 полезных слов или фраз по теме с коротким переводом
+5. Что запомнить
 
 Правила:
 - Без длинных объяснений
+- Без заданий и вопросов
 - Не больше 180 слов
 """
 
@@ -89,29 +92,29 @@ def make_practice_task_prompt(topic: str, level: str) -> str:
 Тема: {topic}
 Уровень: {level}
 
-Сделай ровно 5 заданий:
-1. Translate into English
-2. Make a sentence
-3. Answer the question
-4. Fill the gap
-5. Correct the mistake
+Сделай ровно 5 заданий от лёгкого к более активному:
+1. Choose the best option
+2. Fill the gap
+3. Correct the mistake
+4. Translate a short phrase into English
+5. Make one short sentence
 
 Формат:
-🧠 Practice: {topic}
+✍️ Тренировка: {topic}
 
-1. Translate into English:
+1. Choose the best option:
 ...
 
-2. Make a sentence:
-Use these words: ...
-
-3. Answer the question:
+2. Fill the gap:
 ...
 
-4. Fill the gap:
+3. Correct the mistake:
 ...
 
-5. Correct the mistake:
+4. Translate into English:
+...
+
+5. Make one short sentence:
 ...
 
 Правила:
@@ -120,6 +123,7 @@ Use these words: ...
 - Задания должны проверять именно эту тему
 - Ученик должен мочь ответить одним сообщением
 - Для A1-A2 используй очень простые предложения
+- Не проси длинные сочинения
 """
 
 
@@ -140,6 +144,8 @@ def make_practice_check_prompt(topic: str, level: str, task: str, user_answer: s
 Проверь ответ внимательно.
 
 Формат:
+RESULT: correct или incorrect
+
 1. Результат
 - Сколько примерно верно: X/5 или короткая оценка
 

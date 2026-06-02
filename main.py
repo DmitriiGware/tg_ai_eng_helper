@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import re
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 
 from ai_client import ask_ai
 from database.db import SessionLocal, engine, ensure_user_progress_columns
-from database.models import Base, RoadmapLessonCache, User, VocabWord
+from database.models import Base, RoadmapLessonCache, User, UserMistake, VocabWord
 from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
@@ -153,7 +154,7 @@ def get_free_plan_text() -> str:
     return (
         "Free:\n"
         f"• {FREE_DAILY_AI_LIMIT} AI-запросов в день\n"
-        "• Explain, Summary, Quiz, Practice\n"
+        "• План обучения, разбор темы, тренировка и шпаргалки\n"
         "• Roadmap: готовые модули без расхода AI-запросов, новые темы тратят запрос\n"
         f"• Vocabulary до {FREE_MAX_WORDS_PER_DAY} слов в день\n"
         "• Глоссарий, профиль, уровень и помощь без лимита\n"
@@ -165,7 +166,7 @@ def get_premium_plan_text() -> str:
     return (
         "Premium:\n"
         "• AI-запросы без дневного лимита\n"
-        "• Explain, Summary, Quiz, Practice без лимита\n"
+        "• Разборы, тренировки и шпаргалки без лимита\n"
         "• Roadmap без лимита\n"
         f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
         "• Chat и Voice\n"
@@ -542,6 +543,171 @@ def save_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplif
         db.close()
 
 
+def encode_options(options: list[str] | None) -> str:
+    if not options:
+        return ""
+    return json.dumps(options, ensure_ascii=False)
+
+
+def decode_options(options_text: str | None) -> list[str]:
+    if not options_text:
+        return []
+    try:
+        data = json.loads(options_text)
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_user_mistake(
+    user_id: int,
+    level: str,
+    source: str,
+    topic: str,
+    question: str,
+    correct_answer: str = "",
+    explanation: str = "",
+    options: list[str] | None = None,
+) -> None:
+    question = (question or "").strip()
+    if not question:
+        return
+
+    db = SessionLocal()
+    try:
+        existing = (
+            db.query(UserMistake)
+            .filter(
+                UserMistake.telegram_id == user_id,
+                UserMistake.question == question,
+                UserMistake.status == "active",
+            )
+            .first()
+        )
+        if existing:
+            existing.level = normalize_level(level)
+            existing.source = source
+            existing.topic = topic
+            existing.correct_answer = correct_answer
+            existing.explanation = explanation
+            existing.options = encode_options(options)
+            existing.correct_streak = 0
+            db.commit()
+            return
+
+        now = now_key()
+        db.add(UserMistake(
+            telegram_id=user_id,
+            level=normalize_level(level),
+            source=source,
+            topic=topic,
+            question=question,
+            options=encode_options(options),
+            correct_answer=correct_answer,
+            explanation=explanation,
+            status="active",
+            seen_count=0,
+            correct_streak=0,
+            created_at=now,
+            last_seen_at="",
+        ))
+        db.commit()
+    finally:
+        db.close()
+
+
+def get_due_mistakes(user_id: int, limit: int = 5) -> list[dict]:
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "active")
+            .order_by(UserMistake.correct_streak.asc(), UserMistake.seen_count.asc(), UserMistake.id.asc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": row.id,
+                "level": row.level,
+                "source": row.source,
+                "topic": row.topic,
+                "question": row.question,
+                "options": decode_options(row.options),
+                "correct_answer": row.correct_answer,
+                "explanation": row.explanation,
+            }
+            for row in rows
+        ]
+    finally:
+        db.close()
+
+
+def update_mistake_result(mistake_id: int, is_correct: bool | None) -> None:
+    db = SessionLocal()
+    try:
+        mistake = db.query(UserMistake).filter(UserMistake.id == mistake_id).first()
+        if not mistake:
+            return
+
+        mistake.seen_count = (mistake.seen_count or 0) + 1
+        mistake.last_seen_at = now_key()
+        if is_correct is True:
+            mistake.correct_streak = (mistake.correct_streak or 0) + 1
+            if mistake.correct_streak >= 2:
+                mistake.status = "mastered"
+        elif is_correct is False:
+            mistake.correct_streak = 0
+        db.commit()
+    finally:
+        db.close()
+
+
+def mistake_training_kb(mistake: dict):
+    options = mistake.get("options") or []
+    if not options:
+        return cancel_kb()
+
+    labels = ["A", "B", "C", "D"]
+    rows = [
+        [InlineKeyboardButton(text=labels[index], callback_data=f"mistake_answer:{index}")]
+        for index, _ in enumerate(options[:4])
+    ]
+    rows.append([InlineKeyboardButton(text=cancel_label(), callback_data="cancel")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_mistake_question(mistake: dict, index: int, total: int) -> str:
+    options = mistake.get("options") or []
+    topic = format_topic_title(mistake.get("topic") or "ошибка")
+    text = f"✍️ Работа над ошибками {index + 1}/{total}\nТема: {topic}\n\n{mistake['question']}"
+    if options:
+        labels = ["A", "B", "C", "D"]
+        options_text = "\n".join(f"{labels[i]}) {option}" for i, option in enumerate(options[:4]))
+        text += f"\n\n{options_text}"
+    return text
+
+
+def build_mistake_feedback(mistake: dict, is_correct: bool | None = None) -> str:
+    if is_correct is True:
+        title = "✅ Верно."
+    elif is_correct is False:
+        title = "❌ Пока нет."
+    else:
+        title = "Сверьте с исправлением."
+
+    explanation = mistake.get("explanation") or "Повторите это место и попробуйте похожее задание позже."
+    correct = mistake.get("correct_answer")
+    correct_text = f"\nПравильно: {correct}" if correct else ""
+    return f"{title}{correct_text}\n\n{explanation}"
+
+
+def is_ai_check_correct(feedback: str) -> bool:
+    first_line = next((line.strip().lower() for line in (feedback or "").splitlines() if line.strip()), "")
+    return "result: correct" in first_line
+
+
 def get_roadmap_snapshot(user: User) -> dict:
     level = normalize_level(user.level)
     topics = ROADMAP.get(level, [])
@@ -674,17 +840,16 @@ def cancel_label() -> str:
 def mode_prompt_text(mode: str) -> str:
     prompts = {
         "explain": (
-            "📘 Объяснение темы\n"
-            "Напишите тему, которую хотите понять.\n\n"
+            "📘 Разбор темы\n"
+            "Напишите конкретную тему или вопрос. Я объясню правило, покажу примеры и частые ошибки.\n\n"
             "Примеры:\n"
             "• Present Simple\n"
             "• difference between much and many\n"
-            "• how to use should\n\n"
-            "После объяснения я дам мини-задание и смогу проверить ваш ответ."
+            "• how to use should"
         ),
         "summary": (
-            "📝 Краткий конспект\n"
-            "Напишите тему, и я соберу короткую шпаргалку.\n\n"
+            "📝 Шпаргалка\n"
+            "Напишите тему, и я соберу короткую памятку без длинного урока.\n\n"
             "Примеры:\n"
             "• Past Simple\n"
             "• articles a/an/the\n"
@@ -699,8 +864,8 @@ def mode_prompt_text(mode: str) -> str:
             "• conditionals"
         ),
         "practice": (
-            "✍️ Практика с проверкой\n"
-            "Напишите тему, и я дам 5 заданий. Потом вы отправите ответы, а я проверю.\n\n"
+            "✍️ Тренировка\n"
+            "Сначала я беру ваши сохранённые ошибки из плана и прошлых заданий. Если ошибок пока нет, напишите тему для обычной тренировки.\n\n"
             "Примеры:\n"
             "• to be\n"
             "• comparatives\n"
@@ -728,7 +893,7 @@ def build_main_menu_text(user_id: int) -> str:
 
     return (
         "✨ English Hub\n"
-        "Выберите действие ниже. Самый простой старт — «Объяснить тему» или «План обучения».\n\n"
+        "Самый простой старт — «План обучения». Если есть конкретный вопрос, выберите «Разбор темы».\n\n"
         "Ваш прогресс\n"
         f"• Тариф: {plan}\n"
         f"• AI: {ai_usage}\n"
@@ -742,19 +907,20 @@ def build_main_menu_text(user_id: int) -> str:
 def build_learning_menu_text() -> str:
     return (
         "📘 Обучение\n"
-        "Здесь можно разобрать тему или получить короткую шпаргалку.\n\n"
-        "• Объяснить тему — урок + мини-задание\n"
-        "• Конспект — короткая выжимка\n"
+        "Здесь только объяснение и справочные материалы.\n\n"
+        "• Разбор темы — понять правило и примеры\n"
+        "• Шпаргалка — быстро освежить тему\n"
         f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
     )
 
 
 def build_practice_menu_text() -> str:
     return (
-        "🧠 Практика\n"
-        "Здесь бот даёт задания и проверяет ваши ответы.\n\n"
-        "• Мини-тест — 5 вопросов по теме\n"
-        "• Практика — 5 заданий с проверкой"
+        "✍️ Тренировка\n"
+        "Здесь ученик уже отвечает сам, а бот проверяет ошибки.\n\n"
+        "• Работа над вашими ошибками — без нового AI-запроса\n"
+        "• Если ошибок пока нет — обычная тренировка по теме\n"
+        "• План обучения — теория и короткие тесты по уровню"
     )
 
 
@@ -763,7 +929,7 @@ def build_advanced_menu_text() -> str:
         "🚀 Продвинутые режимы\n"
         "Выберите формат тренировки.\n\n"
         "• План обучения — пошаговые темы по уровню\n"
-        "• Чат-тренировка — диалог по ситуации\n"
+        "• Чат-тренировка — практика диалога по ситуации\n"
         "• Голос — скоро"
     )
 
@@ -807,16 +973,13 @@ def build_premium_text(user_id: int) -> str:
 
 def main_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
         [
-            InlineKeyboardButton(text="📘 Объяснить тему", callback_data="mode_explain"),
-            InlineKeyboardButton(text="📝 Конспект", callback_data="mode_summary"),
+            InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
+            InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice"),
         ],
         [
-            InlineKeyboardButton(text="🧩 Мини-тест", callback_data="mode_quiz"),
-            InlineKeyboardButton(text="✍️ Практика", callback_data="mode_practice"),
-        ],
-        [
-            InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap"),
+            InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
             InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
@@ -826,7 +989,7 @@ def main_menu(user_id: int):
         ],
         [
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
-            InlineKeyboardButton(text="📂 Разделы", callback_data="menu_learning"),
+            InlineKeyboardButton(text="🚀 Ещё", callback_data="menu_advanced"),
         ],
     ])
 
@@ -834,8 +997,8 @@ def main_menu(user_id: int):
 def learning_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="📘 Объяснить тему", callback_data="mode_explain"),
-            InlineKeyboardButton(text="📝 Конспект", callback_data="mode_summary"),
+            InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
+            InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
         ],
         [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
@@ -844,10 +1007,8 @@ def learning_menu(user_id: int):
 
 def practice_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🧩 Мини-тест", callback_data="mode_quiz"),
-            InlineKeyboardButton(text="✍️ Практика", callback_data="mode_practice"),
-        ],
+        [InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice")],
+        [InlineKeyboardButton(text="🗺 План обучения", callback_data="mode_roadmap")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -934,7 +1095,7 @@ def cancel_kb():
 
 def after_explain_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✍️ Дать ещё практику по теме", callback_data="practice")],
+        [InlineKeyboardButton(text="✍️ Потренироваться по теме", callback_data="practice")],
         [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -995,7 +1156,9 @@ class Registration(StatesGroup):
 
 class StudyFlow(StatesGroup):
     waiting_topic = State()
+    after_topic_result = State()
     waiting_practice_answer = State()
+    waiting_mistake_answer = State()
     viewing_roadmap_lesson = State()
     waiting_roadmap_answer = State()
 
@@ -1057,11 +1220,10 @@ async def main():
             "2. Если бот просит тему, напишите её обычным текстом.\n"
             "3. Если бот дал задание, отправьте ответ одним сообщением.\n\n"
             "Что выбрать:\n"
-            "• Объяснить тему — когда хотите понять правило\n"
-            "• Конспект — когда нужна короткая шпаргалка\n"
-            "• Мини-тест — когда хотите проверить себя\n"
-            "• Практика — когда хотите задания с проверкой\n"
-            "• План обучения — когда не знаете, что учить дальше\n"
+            "• План обучения — основной путь по уровню\n"
+            "• Разбор темы — когда хотите понять конкретное правило\n"
+            "• Тренировка — повтор ошибок из плана и прошлых заданий\n"
+            "• Шпаргалка — когда нужна короткая памятка\n"
             "• Слова на день — ежедневный словарь\n\n"
             "Команды: /start, /help, /cancel, /premium"
         )
@@ -1417,8 +1579,92 @@ async def main():
         msg = await message.answer("🤖 Проверяю ответы...")
         asyncio.create_task(delete_later(msg, 5))
         feedback = ask_ai(prompt, level, "practice_check")
+        if not is_ai_check_correct(feedback):
+            save_user_mistake(
+                message.from_user.id,
+                get_level(message.from_user.id),
+                "practice",
+                topic,
+                task,
+                correct_answer="Смотрите сохранённый разбор ниже.",
+                explanation=feedback,
+            )
         await state.clear()
         await message.answer(feedback, reply_markup=main_menu(message.from_user.id))
+
+    async def send_mistake_training_question(message: Message, state: FSMContext):
+        data = await state.get_data()
+        mistakes = data.get("mistake_questions") or []
+        index = data.get("mistake_index", 0)
+        if not mistakes or index >= len(mistakes):
+            await finish_mistake_training(message, state, message.from_user.id)
+            return
+
+        mistake = mistakes[index]
+        await message.answer(
+            format_mistake_question(mistake, index, len(mistakes)),
+            reply_markup=mistake_training_kb(mistake),
+        )
+
+    async def start_mistake_training(message: Message, state: FSMContext, user_id: int) -> bool:
+        mistakes = get_due_mistakes(user_id)
+        if not mistakes:
+            return False
+
+        await state.update_data(
+            mistake_questions=mistakes,
+            mistake_index=0,
+            mistake_results=[],
+        )
+        await state.set_state(StudyFlow.waiting_mistake_answer)
+        await message.answer("✍️ Тренировка по вашим ошибкам. Эти задания уже сохранены, поэтому AI-запрос не тратится.")
+        await send_mistake_training_question(message, state)
+        return True
+
+    async def finish_mistake_training(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        results = data.get("mistake_results") or []
+        correct = sum(1 for item in results if item == "correct")
+        reviewed = sum(1 for item in results if item == "reviewed")
+        total = len(results)
+        await state.clear()
+        if total:
+            await message.answer(
+                f"✅ Тренировка завершена.\n"
+                f"Верно с вариантами: {correct}/{total - reviewed}\n"
+                f"Повторено текстовых ошибок: {reviewed}\n"
+                "Ошибки, которые вы закрываете два раза подряд, уходят из активной тренировки.",
+                reply_markup=main_menu(user_id),
+            )
+        else:
+            await message.answer("Тренировка завершена.", reply_markup=main_menu(user_id))
+
+    async def handle_mistake_answer(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        mistakes = data.get("mistake_questions") or []
+        index = data.get("mistake_index", 0)
+        results = data.get("mistake_results") or []
+        if not mistakes or index >= len(mistakes):
+            await state.clear()
+            await call.message.answer("Состояние тренировки потеряно.", reply_markup=main_menu(call.from_user.id))
+            return
+
+        mistake = mistakes[index]
+        selected_index = int(call.data.split(":", 1)[1])
+        options = mistake.get("options") or []
+        correct_answer = mistake.get("correct_answer")
+        is_correct = 0 <= selected_index < len(options) and options[selected_index] == correct_answer
+        update_mistake_result(mistake["id"], is_correct)
+        results.append("correct" if is_correct else "wrong")
+        await call.message.edit_reply_markup(reply_markup=None)
+        await call.message.answer(build_mistake_feedback(mistake, is_correct))
+
+        index += 1
+        await state.update_data(mistake_index=index, mistake_results=results)
+        if index < len(mistakes):
+            await send_mistake_training_question(call.message, state)
+        else:
+            await finish_mistake_training(call.message, state, call.from_user.id)
 
     async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int):
         db = SessionLocal()
@@ -1584,6 +1830,20 @@ async def main():
                 await message.answer("User not found. Please use /start first.")
                 return
 
+            for question, selected_index in zip(questions, answers):
+                correct_index = question["correct_index"]
+                if selected_index != correct_index:
+                    save_user_mistake(
+                        user_id,
+                        user.level,
+                        roadmap_kind,
+                        topic,
+                        question["question"],
+                        correct_answer=question["options"][correct_index],
+                        explanation=question.get("explanation", ""),
+                        options=question.get("options", []),
+                    )
+
             if roadmap_kind == "review":
                 if result:
                     user.roadmap_review_index = user.current_topic_index or 0
@@ -1654,6 +1914,7 @@ Mistakes:
                 wrong_answers.append({
                     "topic": question["topic"],
                     "question": question["question"],
+                    "options": question["options"],
                     "selected_answer": question["options"][selected_index],
                     "correct_answer": question["answer"],
                 })
@@ -1679,6 +1940,18 @@ Mistakes:
             return
 
         topics = ", ".join(sorted({item["topic"] for item in wrong_answers}))
+        for item in wrong_answers:
+            save_user_mistake(
+                call.from_user.id,
+                target_level,
+                "level_test",
+                item["topic"],
+                item["question"],
+                correct_answer=item["correct_answer"],
+                explanation=f"Ошибка в тесте уровня. Правильный ответ: {item['correct_answer']}",
+                options=item["options"],
+            )
+
         mistakes_text = "\n".join(
             f"- {item['topic']}: ваш ответ — {item['selected_answer']} | правильный — {item['correct_answer']}"
             for item in wrong_answers
@@ -1914,6 +2187,9 @@ Mistakes:
         elif data.startswith("roadmap_quiz_answer:"):
             await handle_roadmap_quiz_answer(call, state)
 
+        elif data.startswith("mistake_answer:"):
+            await handle_mistake_answer(call, state)
+
         elif data == "roadmap_reset_confirm":
             await call.message.answer(
                 "Сбросить план обучения на первую тему текущего уровня?",
@@ -2016,6 +2292,9 @@ Mistakes:
 
             if mode == "roadmap":
                 await show_roadmap(call.message, call.from_user.id)
+                return
+
+            if mode == "practice" and await start_mistake_training(call.message, state, call.from_user.id):
                 return
 
             await state.update_data(mode=mode)
@@ -2131,22 +2410,22 @@ Mistakes:
         await state.update_data(topic=topic, mode=mode)
         if mode == "explain":
             await state.update_data(
-                practice_task=answer,
-                practice_topic=topic,
                 practice_level=level,
-                practice_mode="explain",
             )
-            await state.set_state(StudyFlow.waiting_practice_answer)
+            await state.set_state(StudyFlow.after_topic_result)
             await message.answer(answer, reply_markup=after_explain_kb())
-            await message.answer(
-                "✍️ В конце урока есть мини-задание. Отправьте ответ одним сообщением, и я его проверю.\n\nЕсли хотите просто выйти, нажмите «Главное меню».",
-                reply_markup=cancel_kb(),
-            )
         elif mode in {"quiz", "practice"}:
             await send_practice_task(message, state, answer, topic, level, mode)
         else:
             await state.clear()
             await message.answer(answer, reply_markup=main_menu(message.from_user.id))
+
+    @dp.message(StudyFlow.after_topic_result)
+    async def after_topic_result_input(message: Message, state: FSMContext):
+        await message.answer(
+            "Выберите действие кнопкой: можно потренироваться по теме или вернуться в главное меню.",
+            reply_markup=after_explain_kb(),
+        )
 
     @dp.message(StudyFlow.waiting_practice_answer)
     async def practice_answer_input(message: Message, state: FSMContext):
@@ -2156,6 +2435,36 @@ Mistakes:
             return
 
         await check_practice_answer(message, state, user_answer)
+
+    @dp.message(StudyFlow.waiting_mistake_answer)
+    async def mistake_answer_input(message: Message, state: FSMContext):
+        data = await state.get_data()
+        mistakes = data.get("mistake_questions") or []
+        index = data.get("mistake_index", 0)
+        results = data.get("mistake_results") or []
+        if not mistakes or index >= len(mistakes):
+            await state.clear()
+            await message.answer("Состояние тренировки потеряно.", reply_markup=main_menu(message.from_user.id))
+            return
+
+        mistake = mistakes[index]
+        if mistake.get("options"):
+            await message.answer(
+                "В этом задании нужно выбрать вариант кнопкой под вопросом.",
+                reply_markup=mistake_training_kb(mistake),
+            )
+            return
+
+        update_mistake_result(mistake["id"], None)
+        results.append("reviewed")
+        await message.answer(build_mistake_feedback(mistake, None))
+
+        index += 1
+        await state.update_data(mistake_index=index, mistake_results=results)
+        if index < len(mistakes):
+            await send_mistake_training_question(message, state)
+        else:
+            await finish_mistake_training(message, state, message.from_user.id)
 
     @dp.message(StudyFlow.viewing_roadmap_lesson)
     async def roadmap_theory_input(message: Message, state: FSMContext):

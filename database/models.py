@@ -49,3 +49,22 @@ class RoadmapLessonCache(Base):
     created_at = Column(String, default="")
     last_used_at = Column(String, default="")
     use_count = Column(Integer, default=0)
+
+
+class UserMistake(Base):
+    __tablename__ = "user_mistakes"
+
+    id = Column(Integer, primary_key=True)
+    telegram_id = Column(Integer, index=True)
+    level = Column(String, index=True)
+    source = Column(String, default="")
+    topic = Column(String, index=True)
+    question = Column(Text)
+    options = Column(Text, default="")
+    correct_answer = Column(Text, default="")
+    explanation = Column(Text, default="")
+    status = Column(String, default="active")
+    seen_count = Column(Integer, default=0)
+    correct_streak = Column(Integer, default=0)
+    created_at = Column(String, default="")
+    last_seen_at = Column(String, default="")
