@@ -24,6 +24,8 @@ from level_tests import get_level_test
 from modes import MODES
 from motivation import get_phrase
 from prompts import (
+    make_chat_reply_prompt,
+    make_chat_start_prompt,
     make_practice_check_prompt,
     make_practice_task_prompt,
     make_roadmap_lesson_prompt,
@@ -70,6 +72,8 @@ TIMEZONE_OPTIONS = [
     ("+12:00", "Окленд"),
 ]
 RECENT_VOCAB_HISTORY_LIMIT = 80
+VOCAB_REVIEW_WORDS_COUNT = 8
+VOCAB_REVIEW_INTERVAL_DAYS = 7
 RECENT_IRREGULAR_VERBS_HISTORY_LIMIT = 60
 IRREGULAR_VERBS_PER_DAY = 5
 FREE_DAILY_AI_LIMIT = 5
@@ -77,7 +81,14 @@ FREE_MAX_WORDS_PER_DAY = 3
 PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 ROADMAP_REVIEW_INTERVAL = 3
-ROADMAP_CACHE_VERSION = "v2"
+ROADMAP_CACHE_VERSION = "v3"
+ROADMAP_GENERATION_MAX_ATTEMPTS = 3
+ROADMAP_MIN_THEORY_PAGES = 2
+ROADMAP_MAX_THEORY_PAGES = 3
+ROADMAP_MIN_THEORY_WORDS = 180
+ROADMAP_MAX_THEORY_WORDS = 700
+DAILY_GOAL_ERRORS_TARGET = 3
+DAILY_GOAL_TOPICS_TARGET = 1
 MASTERED_MISTAKES_PAGE_SIZE = 5
 PLACEMENT_TEST_PLAN = [
     ("A1", 2),
@@ -205,6 +216,71 @@ def user_local_today(user: User) -> str:
     return user_local_datetime(user).date().isoformat()
 
 
+def ensure_daily_goal_state(user: User) -> str:
+    today = user_local_today(user)
+    if user.daily_goal_date != today:
+        user.daily_goal_date = today
+        user.daily_goal_errors_closed = 0
+        user.daily_goal_topics_done = 0
+    return today
+
+
+def refresh_user_streak(user: User, today: str) -> None:
+    if user.streak_last_date == today:
+        return
+
+    try:
+        yesterday = (datetime.fromisoformat(today).date() - timedelta(days=1)).isoformat()
+    except ValueError:
+        yesterday = ""
+
+    if user.streak_last_date == yesterday:
+        user.streak_count = (user.streak_count or 0) + 1
+    else:
+        user.streak_count = 1
+    user.streak_last_date = today
+
+
+def visible_streak_count(user: User, today: str) -> int:
+    if not user.streak_last_date:
+        return 0
+    if user.streak_last_date == today:
+        return user.streak_count or 0
+
+    try:
+        yesterday = (datetime.fromisoformat(today).date() - timedelta(days=1)).isoformat()
+    except ValueError:
+        return 0
+    if user.streak_last_date == yesterday:
+        return user.streak_count or 0
+    return 0
+
+
+def record_daily_progress(user_id: int, errors_closed: int = 0, topics_done: int = 0) -> None:
+    if errors_closed <= 0 and topics_done <= 0:
+        return
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return
+
+        today = ensure_daily_goal_state(user)
+        user.daily_goal_errors_closed = min(
+            (user.daily_goal_errors_closed or 0) + max(errors_closed, 0),
+            DAILY_GOAL_ERRORS_TARGET,
+        )
+        user.daily_goal_topics_done = min(
+            (user.daily_goal_topics_done or 0) + max(topics_done, 0),
+            DAILY_GOAL_TOPICS_TARGET,
+        )
+        refresh_user_streak(user, today)
+        db.commit()
+    finally:
+        db.close()
+
+
 def delivery_hour(value: int | None, default: int) -> int:
     if value is None:
         return default
@@ -297,7 +373,8 @@ def get_premium_plan_text() -> str:
         "• Путь изучения без лимита\n"
         f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
         f"• Irregular verbs: {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день\n"
-        "• Chat и Voice\n"
+        "• Чат-тренировка с AI-собеседником\n"
+        "• Voice скоро\n"
         "• приоритет для новых функций"
     )
 
@@ -460,6 +537,45 @@ def get_words_per_day(user_id: int) -> int | None:
     return user.words_per_day if user else None
 
 
+def get_daily_goal_snapshot(user_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return {
+                "streak": 0,
+                "errors_closed": 0,
+                "topics_done": 0,
+                "date": today_key(),
+            }
+
+        today = ensure_daily_goal_state(user)
+        db.commit()
+        return {
+            "streak": visible_streak_count(user, today),
+            "errors_closed": user.daily_goal_errors_closed or 0,
+            "topics_done": user.daily_goal_topics_done or 0,
+            "date": today,
+        }
+    finally:
+        db.close()
+
+
+def build_daily_goal_text(user_id: int) -> str:
+    snapshot = get_daily_goal_snapshot(user_id)
+    errors_done = min(snapshot["errors_closed"], DAILY_GOAL_ERRORS_TARGET)
+    topics_done = min(snapshot["topics_done"], DAILY_GOAL_TOPICS_TARGET)
+    errors_marker = "✅" if errors_done >= DAILY_GOAL_ERRORS_TARGET else "▫️"
+    topic_marker = "✅" if topics_done >= DAILY_GOAL_TOPICS_TARGET else "▫️"
+
+    return (
+        "Сегодняшняя цель\n"
+        f"• Серия дней: {snapshot['streak']}\n"
+        f"• {errors_marker} Закрыть ошибки: {errors_done}/{DAILY_GOAL_ERRORS_TARGET}\n"
+        f"• {topic_marker} Пройти тему: {topics_done}/{DAILY_GOAL_TOPICS_TARGET}"
+    )
+
+
 def is_irregular_verbs_enabled(user_id: int) -> bool:
     user = get_user(user_id)
     return bool(user and user.irregular_verbs_enabled)
@@ -555,6 +671,121 @@ def split_roadmap_lesson(text: str) -> dict:
     return sections
 
 
+def get_roadmap_theory_pages(sections: dict) -> list[str]:
+    return [
+        page
+        for page in [sections.get("theory_1", ""), sections.get("theory_2", ""), sections.get("theory_3", "")]
+        if page
+    ]
+
+
+def count_text_words(text: str) -> int:
+    return len(re.findall(r"[A-Za-zА-Яа-яЁё]+", text or ""))
+
+
+def russian_words(text: str) -> list[str]:
+    return re.findall(r"[А-Яа-яЁё]+", text or "")
+
+
+def sentence_count(text: str) -> int:
+    sentences = [part.strip() for part in re.split(r"[.!?]+", text or "") if part.strip()]
+    return max(len(sentences), 1)
+
+
+def roadmap_complexity_limits(level: str) -> dict:
+    level = normalize_level(level)
+    limits = {
+        "A1": {"avg_sentence_words": 18, "long_word_ratio": 0.18, "hard_terms": 2},
+        "A2": {"avg_sentence_words": 20, "long_word_ratio": 0.22, "hard_terms": 3},
+        "B1": {"avg_sentence_words": 24, "long_word_ratio": 0.28, "hard_terms": 5},
+        "B2": {"avg_sentence_words": 30, "long_word_ratio": 0.36, "hard_terms": 8},
+        "C1": {"avg_sentence_words": 38, "long_word_ratio": 0.45, "hard_terms": 12},
+        "C2": {"avg_sentence_words": 45, "long_word_ratio": 0.55, "hard_terms": 16},
+    }
+    return limits.get(level, limits[DEFAULT_LEVEL])
+
+
+def is_roadmap_text_too_complex(pages: list[str], level: str) -> tuple[bool, list[str]]:
+    limits = roadmap_complexity_limits(level)
+    hard_markers = [
+        "инверси",
+        "номинализац",
+        "причаст",
+        "герунд",
+        "инфинитив",
+        "пассив",
+        "косвен",
+        "условн",
+        "сослагател",
+        "перфект",
+        "модальн",
+        "аспект",
+        "придаточ",
+        "дискурс",
+        "регистр",
+    ]
+    reasons = []
+
+    for index, page in enumerate(pages, start=1):
+        words_count = count_text_words(page)
+        avg_sentence_words = words_count / sentence_count(page)
+        ru_words = russian_words(page)
+        long_ratio = (
+            sum(1 for word in ru_words if len(word) >= 15) / max(len(ru_words), 1)
+        )
+        lower_page = page.lower()
+        hard_terms_count = sum(1 for marker in hard_markers if marker in lower_page)
+
+        if avg_sentence_words > limits["avg_sentence_words"]:
+            reasons.append(
+                f"теория {index}: слишком длинные предложения для {normalize_level(level)}"
+            )
+        if long_ratio > limits["long_word_ratio"]:
+            reasons.append(
+                f"теория {index}: слишком много сложных длинных слов для {normalize_level(level)}"
+            )
+        if hard_terms_count > limits["hard_terms"]:
+            reasons.append(
+                f"теория {index}: слишком много сложных грамматических терминов для {normalize_level(level)}"
+            )
+
+    return bool(reasons), reasons
+
+
+def validate_roadmap_lesson(lesson: str, level: str) -> dict:
+    sections = split_roadmap_lesson(lesson)
+    theory_pages = get_roadmap_theory_pages(sections)
+    quiz_questions = parse_roadmap_quiz(sections["quiz"])
+    reasons = []
+
+    if not (ROADMAP_MIN_THEORY_PAGES <= len(theory_pages) <= ROADMAP_MAX_THEORY_PAGES):
+        reasons.append("нужно 2-3 страницы теории")
+
+    for index, page in enumerate(theory_pages, start=1):
+        words_count = count_text_words(page)
+        if words_count < ROADMAP_MIN_THEORY_WORDS:
+            reasons.append(f"теория {index}: слишком коротко, нужно подробнее")
+        if words_count > ROADMAP_MAX_THEORY_WORDS:
+            reasons.append(f"теория {index}: слишком длинно для одного сообщения")
+
+    if not sections["quiz"]:
+        reasons.append("нет блока QUIZ")
+    if not quiz_questions:
+        reasons.append("нет валидного теста с правильным ответом")
+
+    too_complex, complexity_reasons = is_roadmap_text_too_complex(theory_pages, level)
+    if too_complex:
+        reasons.extend(complexity_reasons)
+
+    return {
+        "valid": not reasons,
+        "reasons": reasons,
+        "sections": sections,
+        "theory_pages": theory_pages,
+        "quiz_questions": quiz_questions,
+    }
+
+
 def is_clear_roadmap_quiz_question(question_text: str, options: list[str]) -> bool:
     question = re.sub(r"\s+", " ", (question_text or "").strip().lower())
     clean_options = [re.sub(r"\s+", " ", option.strip().lower()) for option in options]
@@ -601,7 +832,7 @@ def parse_roadmap_quiz(text: str) -> list[dict]:
         answer_match = re.search(r"(?mi)^\s*ANSWER:\s*([A-D])\s*$", block)
         explanation_match = re.search(r"(?mis)^\s*EXPLANATION:\s*(.*?)\s*$", block)
 
-        if not question_text or len(options) < 2 or not answer_match:
+        if not question_text or len(options) != 4 or not answer_match:
             continue
         if not is_clear_roadmap_quiz_question(question_text, options):
             continue
@@ -941,14 +1172,20 @@ def update_mistake_result(mistake_id: int, is_correct: bool | None) -> tuple[int
 
         mistake.seen_count = (mistake.seen_count or 0) + 1
         mistake.last_seen_at = now_key()
+        newly_mastered_user_id = None
         if is_correct is True:
             mistake.correct_streak = (mistake.correct_streak or 0) + 1
+            was_mastered = mistake.status == "mastered"
             if mistake.correct_streak >= 2:
                 mistake.status = "mastered"
+                if not was_mastered:
+                    newly_mastered_user_id = mistake.telegram_id
         elif is_correct is False:
             mistake.correct_streak = 0
         result = (mistake.correct_streak or 0, mistake.status)
         db.commit()
+        if newly_mastered_user_id:
+            record_daily_progress(newly_mastered_user_id, errors_closed=1)
         return result
     finally:
         db.close()
@@ -1420,11 +1657,12 @@ def mode_prompt_text(mode: str) -> str:
         ),
         "chat": (
             "💬 Чат-тренировка\n"
-            "Напишите ситуацию для диалога.\n\n"
+            "Premium-режим: живой учебный диалог с AI-собеседником.\n\n"
+            "Напишите формат: ситуация, роль бота, ваша роль и что исправлять.\n\n"
             "Примеры:\n"
-            "• small talk at work\n"
-            "• airport conversation\n"
-            "• job interview"
+            "• Ситуация: airport. Ты сотрудник регистрации, я пассажир. Исправляй грамматику после каждой реплики.\n"
+            "• Job interview. Ты HR, я кандидат. Задавай короткие вопросы уровня A2.\n"
+            "• Small talk at work. Исправляй только грубые ошибки и предлагай более естественную фразу."
         ),
     }
     return prompts.get(mode, "✍️ Напишите тему, с которой хотите поработать.")
@@ -1451,6 +1689,7 @@ def build_main_menu_text(user_id: int) -> str:
         f"• Неправильные глаголы: {irregular_text}\n"
         f"• Путь изучения: {roadmap_status}\n"
         f"• Исправлено ошибок: {mastered_count}\n\n"
+        f"{build_daily_goal_text(user_id)}\n\n"
         f"💡 {get_phrase()}"
     )
 
@@ -1472,7 +1711,7 @@ def build_learning_guide_text(user_id: int) -> str:
         "3. Разбор темы\n"
         "Для разового вопроса: когда нужно понять конкретное правило или пример.\n\n"
         "4. Шпаргалка и слова\n"
-        "Помогают быстро вспомнить тему и расширить словарь.\n\n"
+        f"Помогают быстро вспомнить тему и расширить словарь. Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предлагает проверку на {VOCAB_REVIEW_WORDS_COUNT} слов.\n\n"
         "5. Irregular verbs\n"
         "Premium-рассылка: каждый день 5 неправильных глаголов с формами и примером."
     )
@@ -1484,8 +1723,7 @@ def build_learning_menu_text() -> str:
         "Здесь только объяснение и справочные материалы.\n\n"
         "• Разбор темы — понять правило и примеры\n"
         "• Шпаргалка — быстро освежить тему\n"
-        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free\n"
-        "• Irregular verbs — ежедневные неправильные глаголы в Premium"
+        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
     )
 
 
@@ -1501,10 +1739,10 @@ def build_practice_menu_text() -> str:
 
 def build_advanced_menu_text() -> str:
     return (
-        "🚀 Продвинутые режимы\n"
-        "Выберите формат тренировки.\n\n"
-        "• Путь изучения — пошаговые темы по уровню\n"
-        "• Чат-тренировка — практика диалога по ситуации\n"
+        "💎 Premium функции\n"
+        "Здесь собраны функции, которые дают Premium-ценность, а не просто увеличивают лимиты.\n\n"
+        "• Чат-тренировка — живой диалог с AI-собеседником\n"
+        "• Irregular words — ежедневные неправильные глаголы\n"
         "• Голос — скоро"
     )
 
@@ -1530,6 +1768,7 @@ def build_settings_menu_text(user_id: int) -> str:
         f"• Ваше время: {zone_label}\n"
         f"• Слова: {delivery['vocab_hour']:02d}:00\n"
         f"• Ошибки: {delivery['mistake_hour']:02d}:00\n\n"
+        f"{build_daily_goal_text(user_id)}\n\n"
         f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
         "Здесь можно поменять уровень и открыть справку."
     )
@@ -1599,7 +1838,6 @@ def build_premium_text(user_id: int) -> str:
 
 
 def main_menu(user_id: int):
-    irregular_label = "🔥 Irregular verbs" if is_premium(user_id) else "🔥 Irregular verbs 🔒"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
         [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
@@ -1611,7 +1849,6 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
             InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
-        [InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings")],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
@@ -1619,22 +1856,18 @@ def main_menu(user_id: int):
         ],
         [
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
-            InlineKeyboardButton(text="🚀 Ещё", callback_data="menu_advanced"),
+            InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced"),
         ],
     ])
 
 
 def learning_menu(user_id: int):
-    irregular_label = "🔥 Irregular verbs" if is_premium(user_id) else "🔥 Irregular verbs 🔒"
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
         ],
-        [
-            InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
-            InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
-        ],
+        [InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -1654,10 +1887,12 @@ def advanced_menu(user_id: int):
             return f"{text} 🔒"
         return text
 
+    irregular_label = "🔥 Irregular words" if is_premium(user_id) else "🔥 Irregular words 🔒"
+
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
-            InlineKeyboardButton(text=lock("🗺 Путь изучения", "roadmap"), callback_data="mode_roadmap"),
+            InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
         ],
         [InlineKeyboardButton(text=lock("🎤 Голос скоро", "voice"), callback_data="mode_voice")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
@@ -1802,6 +2037,27 @@ def cancel_kb():
     ])
 
 
+def chat_training_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏁 Закончить чат", callback_data="chat_end")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def vocab_review_invite_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧪 Начать проверку", callback_data="vocab_review_start")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def vocab_review_question_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🤔 Не помню", callback_data="vocab_review_skip")],
+        [InlineKeyboardButton(text="✖️ Отмена проверки", callback_data="vocab_review_cancel")],
+    ])
+
+
 def after_explain_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✍️ Потренироваться по теме", callback_data="practice")],
@@ -1853,6 +2109,7 @@ def vocab_count_kb(user_id: int, current_value: int | None = None):
     if row:
         rows.append(row)
 
+    rows.append([InlineKeyboardButton(text="🧪 Проверить слова", callback_data="vocab_review_start")])
     rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1866,9 +2123,11 @@ class Registration(StatesGroup):
 
 class StudyFlow(StatesGroup):
     waiting_topic = State()
+    waiting_chat_message = State()
     after_topic_result = State()
     waiting_practice_answer = State()
     waiting_mistake_answer = State()
+    waiting_vocab_review_answer = State()
     viewing_roadmap_lesson = State()
     waiting_roadmap_answer = State()
 
@@ -2146,6 +2405,119 @@ async def main():
 
         return result
 
+    def normalize_translation_answer(text: str) -> str:
+        text = (text or "").strip().lower().replace("ё", "е")
+        text = re.sub(r"[^\w\s,;/|-]+", " ", text, flags=re.UNICODE)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def translation_variants(text: str) -> set[str]:
+        normalized = normalize_translation_answer(text)
+        if not normalized:
+            return set()
+
+        parts = re.split(r"[,;/|]|\s+-\s+|\s+или\s+", normalized)
+        variants = {part.strip() for part in parts if part.strip()}
+        variants.add(normalized)
+        return variants
+
+    def is_vocab_translation_correct(expected: str, user_answer: str) -> bool:
+        expected_variants = translation_variants(expected)
+        answer_variants = translation_variants(user_answer)
+        if not expected_variants or not answer_variants:
+            return False
+
+        for answer in answer_variants:
+            for expected_value in expected_variants:
+                if answer == expected_value:
+                    return True
+                if len(answer) >= 4 and len(expected_value) >= 4 and (
+                    answer in expected_value or expected_value in answer
+                ):
+                    return True
+        return False
+
+    def get_vocab_review_words(user_id: int, limit: int = VOCAB_REVIEW_WORDS_COUNT) -> list[dict]:
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(VocabWord)
+                .filter(VocabWord.telegram_id == user_id)
+                .order_by(VocabWord.id.desc())
+                .limit(RECENT_VOCAB_HISTORY_LIMIT)
+                .all()
+            )
+            unique = []
+            seen = set()
+            for row in rows:
+                key = normalize_vocab_key(row.word)
+                if not key or key in seen:
+                    continue
+
+                seen.add(key)
+                unique.append({
+                    "word": row.word,
+                    "translation": row.translation,
+                    "example": row.example,
+                })
+
+            if len(unique) < limit:
+                return []
+            return random.sample(unique, limit)
+        finally:
+            db.close()
+
+    def format_vocab_review_question(item: dict, index: int, total: int) -> str:
+        return (
+            f"🧪 Проверка слов {index + 1}/{total}\n\n"
+            f"Слово: {item['word']}\n\n"
+            "Введите перевод на русском."
+        )
+
+    def build_vocab_review_feedback(item: dict, is_correct: bool, user_answer: str) -> str:
+        if is_correct:
+            return f"✅ Верно: {item['word']} — {item['translation']}"
+
+        answer_text = user_answer or "не помню"
+        return (
+            "❌ Не засчитано.\n\n"
+            f"Ваш ответ: {answer_text}\n"
+            f"Правильно: {item['translation']}\n"
+            f"Пример: {item.get('example') or '—'}"
+        )
+
+    def build_vocab_review_summary(results: list[dict]) -> str:
+        total = len(results)
+        correct = sum(1 for result in results if result.get("is_correct"))
+        skipped = sum(1 for result in results if result.get("skipped"))
+        lines = []
+        for index, result in enumerate(results, start=1):
+            status = "✅" if result.get("is_correct") else "❌"
+            lines.append(
+                f"{index}. {status} {result['word']} — {result['translation']}"
+            )
+
+        return (
+            "🧪 Проверка слов завершена\n\n"
+            f"Верно: {correct}/{total}\n"
+            f"Не вспомнили: {skipped}\n\n"
+            + "\n".join(lines)
+        )
+
+    def is_vocab_review_due(user: User) -> bool:
+        if not user.words_per_day:
+            return False
+
+        today = user_local_datetime(user).date()
+        if not user.last_vocab_review_sent_date:
+            return True
+
+        try:
+            last_sent = datetime.fromisoformat(user.last_vocab_review_sent_date).date()
+        except ValueError:
+            return True
+        return (today - last_sent).days >= VOCAB_REVIEW_INTERVAL_DAYS
+
     def normalize_irregular_verb_key(verb: str) -> str:
         return (verb or "").strip().lower()
 
@@ -2177,11 +2549,84 @@ async def main():
         await message.answer(
             "✨ Настройка словаря\n"
             "Выберите, сколько новых слов присылать каждый день.\n"
+            f"Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предложит проверку: {VOCAB_REVIEW_WORDS_COUNT} слов, перевод вводится вручную.\n"
             f"Free: до {FREE_MAX_WORDS_PER_DAY} слов в день.\n"
             f"Premium: до {PREMIUM_MAX_WORDS_PER_DAY} слов в день.\n"
             f"Ваш максимум сейчас: {max_words}.",
             reply_markup=vocab_count_kb(user_id, current_value),
         )
+
+    async def start_vocab_review(message: Message, state: FSMContext, user_id: int):
+        words = get_vocab_review_words(user_id)
+        if not words:
+            await message.answer(
+                f"Пока не хватает слов для проверки. Нужно минимум {VOCAB_REVIEW_WORDS_COUNT} слов из вашего словаря.",
+                reply_markup=main_menu(user_id),
+            )
+            return
+
+        await state.update_data(
+            vocab_review_words=words,
+            vocab_review_index=0,
+            vocab_review_results=[],
+        )
+        await send_vocab_review_question(message, state, user_id)
+
+    async def send_vocab_review_question(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        words = data.get("vocab_review_words") or []
+        index = data.get("vocab_review_index", 0)
+        if not words or index >= len(words):
+            await finish_vocab_review(message, state, user_id)
+            return
+
+        await state.set_state(StudyFlow.waiting_vocab_review_answer)
+        await message.answer(
+            format_vocab_review_question(words[index], index, len(words)),
+            reply_markup=vocab_review_question_kb(),
+        )
+
+    async def handle_vocab_review_answer(
+        message: Message,
+        state: FSMContext,
+        user_id: int,
+        user_answer: str = "",
+        skipped: bool = False,
+    ):
+        data = await state.get_data()
+        words = data.get("vocab_review_words") or []
+        index = data.get("vocab_review_index", 0)
+        results = data.get("vocab_review_results") or []
+        if not words or index >= len(words):
+            await finish_vocab_review(message, state, user_id)
+            return
+
+        item = words[index]
+        is_correct = False if skipped else is_vocab_translation_correct(item["translation"], user_answer)
+        results.append({
+            "word": item["word"],
+            "translation": item["translation"],
+            "answer": user_answer,
+            "is_correct": is_correct,
+            "skipped": skipped,
+        })
+
+        await message.answer(build_vocab_review_feedback(item, is_correct, user_answer))
+        await state.update_data(
+            vocab_review_index=index + 1,
+            vocab_review_results=results,
+        )
+        await send_vocab_review_question(message, state, user_id)
+
+    async def finish_vocab_review(message: Message, state: FSMContext, user_id: int):
+        data = await state.get_data()
+        results = data.get("vocab_review_results") or []
+        await state.clear()
+        if not results:
+            await message.answer("Проверка слов отменена.", reply_markup=main_menu(user_id))
+            return
+
+        await message.answer(build_vocab_review_summary(results), reply_markup=main_menu(user_id))
 
     async def show_irregular_verbs_settings(message: Message, user_id: int):
         if not is_premium(user_id):
@@ -2285,6 +2730,43 @@ async def main():
         finally:
             db.close()
 
+    async def send_vocab_review_invite(bot: Bot, user_id: int) -> bool:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user or not is_vocab_review_due(user):
+                return False
+
+            target_hour = delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR)
+            if not is_delivery_due(user, user.last_vocab_review_sent_date, target_hour):
+                return False
+
+            recent_words = (
+                db.query(VocabWord)
+                .filter(VocabWord.telegram_id == user_id)
+                .order_by(VocabWord.id.desc())
+                .limit(RECENT_VOCAB_HISTORY_LIMIT)
+                .all()
+            )
+            unique_words = {normalize_vocab_key(item.word) for item in recent_words if normalize_vocab_key(item.word)}
+            if len(unique_words) < VOCAB_REVIEW_WORDS_COUNT:
+                return False
+
+            today = user_local_today(user)
+            user.last_vocab_review_sent_date = today
+            db.commit()
+        finally:
+            db.close()
+
+        await bot.send_message(
+            user_id,
+            "🧪 Пора проверить новые слова!\n\n"
+            f"В тесте будет {VOCAB_REVIEW_WORDS_COUNT} слов из вашего словаря. Нужно ввести перевод вручную.\n"
+            "Если слово не вспоминается, нажмите «Не помню».",
+            reply_markup=vocab_review_invite_kb(),
+        )
+        return True
+
     async def send_irregular_verbs(bot: Bot, user_id: int, force: bool = False) -> bool:
         db = SessionLocal()
         try:
@@ -2384,6 +2866,7 @@ async def main():
                 for user in users:
                     try:
                         await send_vocab_words(bot, user.telegram_id)
+                        await send_vocab_review_invite(bot, user.telegram_id)
                     except Exception as exc:
                         logging.exception("Failed to send daily vocabulary to %s: %s", user.telegram_id, exc)
             except Exception as exc:
@@ -2424,6 +2907,59 @@ async def main():
                 logging.exception("Irregular verbs daily loop failed: %s", exc)
 
             await asyncio.sleep(3600)
+
+    async def start_chat_training(message: Message, state: FSMContext, user_id: int, user_format: str, level: str):
+        if not await ensure_ai_quota(message, user_id):
+            await state.clear()
+            return
+
+        msg = await message.answer("🤖 Настраиваю диалог...")
+        asyncio.create_task(delete_later(msg, 5))
+        prompt = make_chat_start_prompt(user_format, level)
+
+        try:
+            answer = ask_ai(prompt, level, "chat")
+        except Exception as exc:
+            await state.clear()
+            await message.answer(f"Ошибка: {exc}")
+            await message.answer(build_main_menu_text(user_id), reply_markup=main_menu(user_id))
+            return
+
+        await state.update_data(
+            mode="chat",
+            chat_format=user_format,
+            chat_level=level,
+            chat_history=[{"role": "assistant", "text": answer}],
+        )
+        await state.set_state(StudyFlow.waiting_chat_message)
+        await message.answer(answer, reply_markup=chat_training_kb())
+
+    async def continue_chat_training(message: Message, state: FSMContext, user_id: int, user_message: str):
+        data = await state.get_data()
+        user_format = data.get("chat_format") or "Свободный диалог для практики английского."
+        level = data.get("chat_level") or level_label(get_level(user_id))
+        history = data.get("chat_history") or []
+
+        if not await ensure_ai_quota(message, user_id):
+            await state.clear()
+            return
+
+        msg = await message.answer("🤖 Отвечаю...")
+        asyncio.create_task(delete_later(msg, 5))
+        prompt = make_chat_reply_prompt(user_format, level, history, user_message)
+
+        try:
+            answer = ask_ai(prompt, level, "chat")
+        except Exception as exc:
+            await state.clear()
+            await message.answer(f"Ошибка: {exc}")
+            await message.answer(build_main_menu_text(user_id), reply_markup=main_menu(user_id))
+            return
+
+        history.append({"role": "user", "text": user_message})
+        history.append({"role": "assistant", "text": answer})
+        await state.update_data(chat_history=history[-10:])
+        await message.answer(answer, reply_markup=chat_training_kb())
 
     async def send_practice_task(message: Message, state: FSMContext, answer: str, topic: str, level: str, mode: str):
         await state.update_data(
@@ -2703,51 +3239,67 @@ async def main():
 
         cached_lesson = get_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify)
         lesson = cached_lesson
+        validation = validate_roadmap_lesson(lesson, level_code) if lesson else None
         generated_new_lesson = False
+
+        def build_generation_prompt(reasons: list[str] | None = None) -> str:
+            if review_due:
+                prompt = make_roadmap_review_prompt(review_topics, level, simplify)
+            else:
+                prompt = make_roadmap_lesson_prompt(topic, level, simplify)
+
+            if reasons:
+                prompt += (
+                    "\n\nКонтроль качества: предыдущий модуль был отклонён.\n"
+                    "Исправь эти проблемы в новой версии:\n"
+                    + "\n".join(f"- {reason}" for reason in reasons[:6])
+                    + "\n\nВерни полностью новый модуль в том же строгом формате."
+                )
+            return prompt
+
+        if validation and not validation["valid"]:
+            logging.warning("Cached roadmap lesson rejected: %s", "; ".join(validation["reasons"]))
+            lesson = None
 
         if not lesson:
             if not await ensure_ai_quota(message, user_id):
                 await state.clear()
                 return
 
-            if review_due:
-                lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
-            else:
-                lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
-            generated_new_lesson = True
+            previous_reasons = validation["reasons"] if validation else []
+            for attempt in range(ROADMAP_GENERATION_MAX_ATTEMPTS):
+                lesson = ask_ai(
+                    build_generation_prompt(previous_reasons if previous_reasons else None),
+                    level,
+                    "roadmap_review" if review_due else "roadmap",
+                )
+                generated_new_lesson = True
+                validation = validate_roadmap_lesson(lesson, level_code)
+                if validation["valid"]:
+                    break
 
-        sections = split_roadmap_lesson(lesson)
-        theory_pages = [
-            page
-            for page in [sections["theory_1"], sections["theory_2"], sections["theory_3"]]
-            if page
-        ] or [lesson]
-        quiz_questions = parse_roadmap_quiz(sections["quiz"])
-        if not quiz_questions and cached_lesson:
-            if not await ensure_ai_quota(message, user_id):
-                await state.clear()
-                return
+                previous_reasons = validation["reasons"]
+                logging.warning(
+                    "Generated roadmap lesson rejected on attempt %s/%s: %s",
+                    attempt + 1,
+                    ROADMAP_GENERATION_MAX_ATTEMPTS,
+                    "; ".join(previous_reasons),
+                )
 
-            if review_due:
-                lesson = ask_ai(make_roadmap_review_prompt(review_topics, level, simplify), level, "roadmap_review")
-            else:
-                lesson = ask_ai(make_roadmap_lesson_prompt(topic, level, simplify), level, "roadmap")
-            generated_new_lesson = True
-            sections = split_roadmap_lesson(lesson)
-            theory_pages = [
-                page
-                for page in [sections["theory_1"], sections["theory_2"], sections["theory_3"]]
-                if page
-            ] or [lesson]
-            quiz_questions = parse_roadmap_quiz(sections["quiz"])
-
-        if not quiz_questions:
+        if not validation or not validation["valid"]:
             await state.clear()
+            reasons_text = "\n".join(f"• {reason}" for reason in (validation or {}).get("reasons", [])[:5])
+            details = f"\n\nЧто не прошло:\n{reasons_text}" if reasons_text else ""
             await message.answer(
-                "Не получилось собрать тест из урока. Попробуйте запустить урок ещё раз.",
+                "Не получилось собрать качественный урок. Попробуйте запустить путь изучения ещё раз."
+                f"{details}",
                 reply_markup=roadmap_kb(),
             )
             return
+
+        sections = validation["sections"]
+        theory_pages = validation["theory_pages"]
+        quiz_questions = validation["quiz_questions"]
 
         if generated_new_lesson:
             save_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify, lesson)
@@ -2827,6 +3379,7 @@ async def main():
             await message.answer("User not found. Please use /start first.")
             return
 
+        topic_completed = False
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.telegram_id == user_id).first()
@@ -2857,9 +3410,13 @@ async def main():
                     user.last_result = "review_wrong"
             else:
                 update_progress(user, result)
+                topic_completed = result
             db.commit()
         finally:
             db.close()
+
+        if topic_completed:
+            record_daily_progress(user_id, topics_done=1)
 
         await state.clear()
         await message.answer(summary)
@@ -3129,8 +3686,14 @@ Mistakes:
                 current_topic_index=0,
                 roadmap_review_index=0,
                 last_result="",
+                streak_count=0,
+                streak_last_date="",
+                daily_goal_date="",
+                daily_goal_errors_closed=0,
+                daily_goal_topics_done=0,
                 words_per_day=None,
                 last_vocab_sent_date="",
+                last_vocab_review_sent_date="",
                 last_mistake_sent_date="",
                 irregular_verbs_enabled=0,
                 last_irregular_verbs_sent_date="",
@@ -3414,6 +3977,13 @@ Mistakes:
         elif data == "cancel":
             await cancel_action(call.message, state, call.from_user.id)
 
+        elif data == "chat_end":
+            await state.clear()
+            await call.message.answer(
+                "🏁 Чат-тренировка завершена.\n\nЛучше всего закрепить новые фразы через «Путь изучения» или тренировку ошибок.",
+                reply_markup=main_menu(call.from_user.id),
+            )
+
         elif data == "level_test_cancel":
             await state.clear()
             await call.message.edit_text(build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
@@ -3463,6 +4033,25 @@ Mistakes:
         elif data == "vocab_settings":
             await state.clear()
             await show_vocab_settings(call.message, call.from_user.id)
+
+        elif data == "vocab_review_start":
+            await state.clear()
+            await start_vocab_review(call.message, state, call.from_user.id)
+
+        elif data == "vocab_review_skip":
+            await call.message.edit_reply_markup(reply_markup=None)
+            await handle_vocab_review_answer(
+                call.message,
+                state,
+                call.from_user.id,
+                user_answer="",
+                skipped=True,
+            )
+
+        elif data == "vocab_review_cancel":
+            await state.clear()
+            await call.message.edit_reply_markup(reply_markup=None)
+            await call.message.answer("✖️ Проверка слов отменена.", reply_markup=main_menu(call.from_user.id))
 
         elif data == "irregular_verbs_settings":
             await state.clear()
@@ -3611,6 +4200,13 @@ Mistakes:
         if mode == "practice":
             await start_generated_practice(message, state, message.from_user.id, topic, level)
             return
+        if mode == "chat":
+            if not is_premium(message.from_user.id):
+                await state.clear()
+                await message.answer("🔒 Чат-тренировка доступна только в Premium.", reply_markup=premium_kb())
+                return
+            await start_chat_training(message, state, message.from_user.id, topic, level)
+            return
 
         if not await ensure_ai_quota(message, message.from_user.id):
             await state.clear()
@@ -3647,6 +4243,20 @@ Mistakes:
             "Выберите действие кнопкой: можно потренироваться по теме или вернуться в главное меню.",
             reply_markup=after_explain_kb(),
         )
+
+    @dp.message(StudyFlow.waiting_chat_message)
+    async def chat_training_input(message: Message, state: FSMContext):
+        user_message = (message.text or "").strip()
+        if not user_message:
+            await message.answer("Напишите реплику для диалога текстом или завершите чат кнопкой.", reply_markup=chat_training_kb())
+            return
+
+        if not is_premium(message.from_user.id):
+            await state.clear()
+            await message.answer("🔒 Чат-тренировка доступна только в Premium.", reply_markup=premium_kb())
+            return
+
+        await continue_chat_training(message, state, message.from_user.id, user_message)
 
     @dp.message(StudyFlow.waiting_practice_answer)
     async def practice_answer_input(message: Message, state: FSMContext):
@@ -3686,6 +4296,18 @@ Mistakes:
             await send_mistake_training_question(message, state)
         else:
             await finish_mistake_training(message, state, message.from_user.id)
+
+    @dp.message(StudyFlow.waiting_vocab_review_answer)
+    async def vocab_review_answer_input(message: Message, state: FSMContext):
+        user_answer = (message.text or "").strip()
+        if not user_answer:
+            await message.answer(
+                "Введите перевод текстом или нажмите «Не помню».",
+                reply_markup=vocab_review_question_kb(),
+            )
+            return
+
+        await handle_vocab_review_answer(message, state, message.from_user.id, user_answer=user_answer)
 
     @dp.message(StudyFlow.viewing_roadmap_lesson)
     async def roadmap_theory_input(message: Message, state: FSMContext):

@@ -37,6 +37,31 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN last_result VARCHAR DEFAULT ''"
             )
 
+        if "streak_count" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN streak_count INTEGER DEFAULT 0"
+            )
+
+        if "streak_last_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN streak_last_date VARCHAR DEFAULT ''"
+            )
+
+        if "daily_goal_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN daily_goal_date VARCHAR DEFAULT ''"
+            )
+
+        if "daily_goal_errors_closed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN daily_goal_errors_closed INTEGER DEFAULT 0"
+            )
+
+        if "daily_goal_topics_done" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN daily_goal_topics_done INTEGER DEFAULT 0"
+            )
+
         if "words_per_day" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN words_per_day INTEGER"
@@ -45,6 +70,11 @@ def ensure_user_progress_columns():
         if "last_vocab_sent_date" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN last_vocab_sent_date VARCHAR DEFAULT ''"
+            )
+
+        if "last_vocab_review_sent_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_vocab_review_sent_date VARCHAR DEFAULT ''"
             )
 
         if "last_mistake_sent_date" not in columns:
