@@ -2804,9 +2804,17 @@ async def main():
             reply_markup=main_menu(message.from_user.id),
         )
 
-    async def show_help(message: Message, user_id: int | None = None):
+    async def replace_or_answer(message: Message, text: str, reply_markup=None):
+        try:
+            await message.edit_text(text, reply_markup=reply_markup)
+        except Exception as exc:
+            if "message is not modified" in str(exc).lower():
+                return
+            await message.answer(text, reply_markup=reply_markup)
+
+    async def show_help(message: Message, user_id: int | None = None, replace: bool = False):
         guide_user_id = user_id or message.from_user.id
-        await message.answer(
+        text = (
             "❔ Как пользоваться\n\n"
             "1. Нажмите кнопку в главном меню.\n"
             "2. Если бот просит тему, напишите её обычным текстом.\n"
@@ -2814,30 +2822,45 @@ async def main():
             f"{build_learning_guide_text(guide_user_id)}\n\n"
             "Команды: /start, /help, /cancel, /premium"
         )
+        if replace:
+            await replace_or_answer(message, text, reply_markup=main_menu(guide_user_id))
+        else:
+            await message.answer(text)
 
-    async def cancel_action(message: Message, state: FSMContext, user_id: int | None = None):
+    async def cancel_action(message: Message, state: FSMContext, user_id: int | None = None, replace: bool = False):
         menu_user_id = user_id or message.from_user.id
         await state.clear()
-        await message.answer(
-            "✖️ Действие отменено.\n\n" + build_main_menu_text(menu_user_id),
-            reply_markup=main_menu(menu_user_id),
-        )
+        text = "✖️ Действие отменено.\n\n" + build_main_menu_text(menu_user_id)
+        if replace:
+            await replace_or_answer(message, text, reply_markup=main_menu(menu_user_id))
+        else:
+            await message.answer(text, reply_markup=main_menu(menu_user_id))
 
-    async def change_level_action(message: Message, user_id: int):
+    async def change_level_action(message: Message, user_id: int, replace: bool = False):
         current = get_level(user_id)
-        await message.answer(
-            f"🎯 Уровень\n\nСейчас: {level_label(current)}\n\nA1 включается сразу. Для уровней выше бот предложит короткий тест.",
-            reply_markup=level_kb(current),
-        )
+        text = f"🎯 Уровень\n\nСейчас: {level_label(current)}\n\nA1 включается сразу. Для уровней выше бот предложит короткий тест."
+        if replace:
+            await replace_or_answer(message, text, reply_markup=level_kb(current))
+        else:
+            await message.answer(text, reply_markup=level_kb(current))
 
-    async def show_premium(message: Message, user_id: int):
-        await message.answer(build_premium_text(user_id), reply_markup=premium_kb())
+    async def show_premium(message: Message, user_id: int, replace: bool = False):
+        if replace:
+            await replace_or_answer(message, build_premium_text(user_id), reply_markup=premium_kb())
+        else:
+            await message.answer(build_premium_text(user_id), reply_markup=premium_kb())
 
-    async def show_roadmap(message: Message, user_id: int):
-        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+    async def show_roadmap(message: Message, user_id: int, replace: bool = False):
+        if replace:
+            await replace_or_answer(message, build_roadmap_text(user_id), reply_markup=roadmap_kb())
+        else:
+            await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
 
-    async def show_roadmap_topics(message: Message, user_id: int):
-        await message.answer(build_roadmap_topics_text(user_id), reply_markup=roadmap_kb())
+    async def show_roadmap_topics(message: Message, user_id: int, replace: bool = False):
+        if replace:
+            await replace_or_answer(message, build_roadmap_topics_text(user_id), reply_markup=roadmap_kb())
+        else:
+            await message.answer(build_roadmap_topics_text(user_id), reply_markup=roadmap_kb())
 
     async def reset_roadmap_progress(message: Message, user_id: int):
         db = SessionLocal()
@@ -2854,8 +2877,11 @@ async def main():
         finally:
             db.close()
 
-        await message.answer("🔄 Прогресс пути изучения сброшен.", reply_markup=roadmap_kb())
-        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+        await replace_or_answer(
+            message,
+            "🔄 Прогресс пути изучения сброшен.\n\n" + build_roadmap_text(user_id),
+            reply_markup=roadmap_kb(),
+        )
 
     async def send_stars_invoice(bot: Bot, user_id: int):
         payload = f"premium_stars:{user_id}:{uuid4().hex[:16]}"
@@ -3174,18 +3200,21 @@ async def main():
             )
         return "\n\n".join(blocks)
 
-    async def show_vocab_settings(message: Message, user_id: int):
+    async def show_vocab_settings(message: Message, user_id: int, replace: bool = False):
         current_value = get_words_per_day(user_id) or DEFAULT_WORDS_PER_DAY
         max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
-        await message.answer(
+        text = (
             "✨ Настройка словаря\n"
             "Выберите, сколько новых слов присылать каждый день.\n"
             f"Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предложит проверку: {VOCAB_REVIEW_WORDS_COUNT} слов, перевод вводится вручную.\n"
             f"Free: до {FREE_MAX_WORDS_PER_DAY} слов в день.\n"
             f"Premium: до {PREMIUM_MAX_WORDS_PER_DAY} слов в день.\n"
-            f"Ваш максимум сейчас: {max_words}.",
-            reply_markup=vocab_count_kb(user_id, current_value),
+            f"Ваш максимум сейчас: {max_words}."
         )
+        if replace:
+            await replace_or_answer(message, text, reply_markup=vocab_count_kb(user_id, current_value))
+        else:
+            await message.answer(text, reply_markup=vocab_count_kb(user_id, current_value))
 
     async def start_vocab_review(message: Message, state: FSMContext, user_id: int):
         words = get_vocab_review_words(user_id)
@@ -3264,13 +3293,9 @@ async def main():
         )
         await message.answer(build_vocab_review_summary(results), reply_markup=main_menu(user_id))
 
-    async def show_irregular_verbs_settings(message: Message, user_id: int):
+    async def show_irregular_verbs_settings(message: Message, user_id: int, replace: bool = False):
         if not is_premium(user_id):
-            await message.answer(
-                "🔒 Irregular verbs — Premium-функция.\n\n"
-                f"В Premium бот будет присылать по {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день: base, past simple, past participle, перевод и пример.",
-                reply_markup=premium_kb(),
-            )
+            await show_premium(message, user_id, replace=replace)
             return
 
         db = SessionLocal()
@@ -4589,23 +4614,27 @@ Mistakes:
             return
 
         if data == "help":
-            await show_help(call.message, call.from_user.id)
+            await show_help(call.message, call.from_user.id, replace=True)
 
         elif data == "learning_guide":
-            await call.message.answer(build_learning_guide_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
+            await replace_or_answer(
+                call.message,
+                build_learning_guide_text(call.from_user.id),
+                reply_markup=main_menu(call.from_user.id),
+            )
 
         elif data == "premium":
-            await show_premium(call.message, call.from_user.id)
+            await show_premium(call.message, call.from_user.id, replace=True)
 
         elif data == "premium_stats":
             if not is_premium(call.from_user.id):
-                await call.message.answer("🔒 Подробная статистика доступна только в Premium.", reply_markup=premium_kb())
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
             await call.message.edit_text(build_premium_stats_text(call.from_user.id), reply_markup=premium_stats_kb())
 
         elif data == "weekly_report":
             if not is_premium(call.from_user.id):
-                await call.message.answer("🔒 Еженедельный отчёт доступен только в Premium.", reply_markup=premium_kb())
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
             await call.message.edit_text(build_weekly_report_text(call.from_user.id), reply_markup=weekly_report_kb())
 
@@ -4657,7 +4686,7 @@ Mistakes:
 
         elif data == "delivery_irregular_verbs_hour":
             if not is_premium(call.from_user.id):
-                await call.message.answer("🔒 Irregular verbs доступны только в Premium.", reply_markup=premium_kb())
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
 
             delivery = get_delivery_settings(call.from_user.id)
@@ -4726,7 +4755,7 @@ Mistakes:
             await send_roadmap_lesson(call.message, state, call.from_user.id)
 
         elif data == "roadmap_topics":
-            await show_roadmap_topics(call.message, call.from_user.id)
+            await show_roadmap_topics(call.message, call.from_user.id, replace=True)
 
         elif data.startswith("roadmap_theory:"):
             theory_index = int(data.split(":", 1)[1])
@@ -4746,7 +4775,8 @@ Mistakes:
             await handle_daily_mistake_answer(call)
 
         elif data == "roadmap_reset_confirm":
-            await call.message.answer(
+            await replace_or_answer(
+                call.message,
                 "Сбросить путь изучения на первую тему текущего уровня?",
                 reply_markup=roadmap_reset_confirm_kb(),
             )
@@ -4756,7 +4786,7 @@ Mistakes:
             await reset_roadmap_progress(call.message, call.from_user.id)
 
         elif data == "cancel":
-            await cancel_action(call.message, state, call.from_user.id)
+            await cancel_action(call.message, state, call.from_user.id, replace=True)
 
         elif data == "chat_end":
             state_data = await state.get_data()
@@ -4772,14 +4802,18 @@ Mistakes:
 
         elif data == "level_test_cancel":
             await state.clear()
-            await call.message.edit_text(build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
 
         elif data == "level_test_yes":
             state_data = await state.get_data()
             target_level = state_data.get("pending_level")
             if not target_level:
                 await state.clear()
-                await call.message.answer("Сначала выберите уровень.", reply_markup=main_menu(call.from_user.id))
+                await replace_or_answer(
+                    call.message,
+                    "Сначала выберите уровень.\n\n" + build_main_menu_text(call.from_user.id),
+                    reply_markup=main_menu(call.from_user.id),
+                )
                 return
 
             await state.set_state(LevelChangeFlow.testing)
@@ -4798,7 +4832,11 @@ Mistakes:
             index = state_data.get("level_index", 0)
             if not questions or index >= len(questions):
                 await state.clear()
-                await call.message.answer("Состояние теста потеряно.", reply_markup=main_menu(call.from_user.id))
+                await replace_or_answer(
+                    call.message,
+                    "Состояние теста потеряно.\n\n" + build_main_menu_text(call.from_user.id),
+                    reply_markup=main_menu(call.from_user.id),
+                )
                 return
 
             selected_index = int(data.split(":", 1)[1])
@@ -4818,7 +4856,7 @@ Mistakes:
 
         elif data == "vocab_settings":
             await state.clear()
-            await show_vocab_settings(call.message, call.from_user.id)
+            await show_vocab_settings(call.message, call.from_user.id, replace=True)
 
         elif data == "vocab_review_start":
             await state.clear()
@@ -4837,11 +4875,15 @@ Mistakes:
         elif data == "vocab_review_cancel":
             await state.clear()
             await call.message.edit_reply_markup(reply_markup=None)
-            await call.message.answer("✖️ Проверка слов отменена.", reply_markup=main_menu(call.from_user.id))
+            await replace_or_answer(
+                call.message,
+                "✖️ Проверка слов отменена.\n\n" + build_main_menu_text(call.from_user.id),
+                reply_markup=main_menu(call.from_user.id),
+            )
 
         elif data == "irregular_verbs_settings":
             await state.clear()
-            await show_irregular_verbs_settings(call.message, call.from_user.id)
+            await show_irregular_verbs_settings(call.message, call.from_user.id, replace=True)
 
         elif data.startswith("set_vocab_count:"):
             value = int(data.split(":", 1)[1])
@@ -4850,10 +4892,7 @@ Mistakes:
                 return
 
             if not is_premium(call.from_user.id) and value > FREE_MAX_WORDS_PER_DAY:
-                await call.message.answer(
-                    f"🔒 В Free доступно до {FREE_MAX_WORDS_PER_DAY} слов в день. Больше — в Premium.",
-                    reply_markup=premium_kb(),
-                )
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
 
             db = SessionLocal()
@@ -4878,18 +4917,19 @@ Mistakes:
         elif data.startswith("mode_"):
             mode = data.replace("mode_", "")
             if MODES[mode]["premium"] and not is_premium(call.from_user.id):
-                await call.message.answer("🔒 Этот режим доступен только в Premium.", reply_markup=premium_kb())
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
 
             if mode == "voice":
-                await call.message.answer(
+                await replace_or_answer(
+                    call.message,
                     "🎤 Голосовой режим пока готовится.\n\nСейчас можно пользоваться текстовыми режимами: объяснение, практика, тесты и путь изучения.",
                     reply_markup=main_menu(call.from_user.id),
                 )
                 return
 
             if mode == "roadmap":
-                await show_roadmap(call.message, call.from_user.id)
+                await show_roadmap(call.message, call.from_user.id, replace=True)
                 return
 
             if mode == "practice" and await start_mistake_training(call.message, state, call.from_user.id):
@@ -4901,33 +4941,33 @@ Mistakes:
             asyncio.create_task(delete_later(msg, 30))
 
         elif data == "change_level":
-            await change_level_action(call.message, call.from_user.id)
+            await change_level_action(call.message, call.from_user.id, replace=True)
 
         elif data == "noop":
             await call.answer()
 
         elif data == "menu_learning":
-            await call.message.edit_text(build_learning_menu_text(), reply_markup=learning_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_learning_menu_text(), reply_markup=learning_menu(call.from_user.id))
 
         elif data == "menu_practice":
-            await call.message.edit_text(build_practice_menu_text(), reply_markup=practice_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_practice_menu_text(), reply_markup=practice_menu(call.from_user.id))
 
         elif data == "menu_advanced":
-            await call.message.edit_text(build_advanced_menu_text(), reply_markup=advanced_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_advanced_menu_text(), reply_markup=advanced_menu(call.from_user.id))
 
         elif data == "menu_settings":
-            await call.message.edit_text(build_settings_menu_text(call.from_user.id), reply_markup=settings_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_settings_menu_text(call.from_user.id), reply_markup=settings_menu(call.from_user.id))
 
         elif data == "back_main":
             await state.clear()
-            await call.message.edit_text(build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
+            await replace_or_answer(call.message, build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
 
         elif data == "glossary":
-            await call.message.edit_text("📖 Глоссарий\nВыберите раздел:", reply_markup=glossary_menu())
+            await replace_or_answer(call.message, "📖 Глоссарий\nВыберите раздел:", reply_markup=glossary_menu())
 
         elif data.startswith("glossary_"):
             category = data.replace("glossary_", "")
-            await call.message.edit_text(glossary_text(category), reply_markup=glossary_menu())
+            await replace_or_answer(call.message, glossary_text(category), reply_markup=glossary_menu())
 
         elif data == "practice":
             state_data = await state.get_data()
@@ -4935,7 +4975,11 @@ Mistakes:
             level = level_label(get_level(call.from_user.id))
 
             if not topic:
-                await call.message.answer("Тема потерялась. Попробуйте снова.", reply_markup=main_menu(call.from_user.id))
+                await replace_or_answer(
+                    call.message,
+                    "Тема потерялась. Попробуйте снова.\n\n" + build_main_menu_text(call.from_user.id),
+                    reply_markup=main_menu(call.from_user.id),
+                )
                 return
 
             await start_generated_practice(call.message, state, call.from_user.id, topic, level)
