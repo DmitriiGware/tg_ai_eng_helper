@@ -1966,7 +1966,7 @@ def build_premium_text(user_id: int) -> str:
 def main_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
-        [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
+        [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
         [
             InlineKeyboardButton(text="📘 Разбор темы", callback_data="mode_explain"),
             InlineKeyboardButton(text="✍️ Тренировка", callback_data="mode_practice"),
@@ -1982,7 +1982,7 @@ def main_menu(user_id: int):
         ],
         [
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
-            InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced"),
+            InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide"),
         ],
     ])
 

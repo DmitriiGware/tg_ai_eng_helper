@@ -1,12 +1,31 @@
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-DB_PATH = Path(__file__).resolve().parent.parent / "bot.db"
-DATABASE_URL = f"sqlite:///{DB_PATH.as_posix()}"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
 
-engine = create_engine(DATABASE_URL,echo=False)
+
+def resolve_database_url() -> str:
+    direct_url = (os.getenv("DATABASE_URL") or "").strip()
+    if direct_url:
+        return direct_url
+
+    raw_path = (os.getenv("DATABASE_PATH") or "").strip()
+    db_path = Path(raw_path) if raw_path else PROJECT_ROOT / "bot.db"
+    if not db_path.is_absolute():
+        db_path = PROJECT_ROOT / db_path
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    return f"sqlite:///{db_path.as_posix()}"
+
+
+DATABASE_URL = resolve_database_url()
+
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(bind = engine)
 
 Base = declarative_base()
