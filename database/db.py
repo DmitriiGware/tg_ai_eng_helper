@@ -62,6 +62,51 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN daily_goal_topics_done INTEGER DEFAULT 0"
             )
 
+        if "roadmap_topics_completed_total" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN roadmap_topics_completed_total INTEGER DEFAULT 0"
+            )
+
+        if "practice_sessions_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN practice_sessions_completed INTEGER DEFAULT 0"
+            )
+
+        if "mistake_training_sessions_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN mistake_training_sessions_completed INTEGER DEFAULT 0"
+            )
+
+        if "chat_sessions_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN chat_sessions_completed INTEGER DEFAULT 0"
+            )
+
+        if "ai_explanations_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN ai_explanations_completed INTEGER DEFAULT 0"
+            )
+
+        if "ai_summaries_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN ai_summaries_completed INTEGER DEFAULT 0"
+            )
+
+        if "ai_quizzes_completed" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN ai_quizzes_completed INTEGER DEFAULT 0"
+            )
+
+        if "vocab_review_checked_count" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN vocab_review_checked_count INTEGER DEFAULT 0"
+            )
+
+        if "vocab_review_correct_count" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN vocab_review_correct_count INTEGER DEFAULT 0"
+            )
+
         if "words_per_day" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN words_per_day INTEGER"

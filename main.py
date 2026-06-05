@@ -281,6 +281,40 @@ def record_daily_progress(user_id: int, errors_closed: int = 0, topics_done: int
         db.close()
 
 
+def increment_user_stats(user_id: int, **increments: int) -> None:
+    allowed_fields = {
+        "roadmap_topics_completed_total",
+        "practice_sessions_completed",
+        "mistake_training_sessions_completed",
+        "chat_sessions_completed",
+        "ai_explanations_completed",
+        "ai_summaries_completed",
+        "ai_quizzes_completed",
+        "vocab_review_checked_count",
+        "vocab_review_correct_count",
+    }
+    increments = {
+        field: value
+        for field, value in increments.items()
+        if field in allowed_fields and value
+    }
+    if not increments:
+        return
+
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return
+
+        for field, value in increments.items():
+            current = getattr(user, field, 0) or 0
+            setattr(user, field, max(current + int(value), 0))
+        db.commit()
+    finally:
+        db.close()
+
+
 def delivery_hour(value: int | None, default: int) -> int:
     if value is None:
         return default
@@ -373,6 +407,7 @@ def get_premium_plan_text() -> str:
         "• Путь изучения без лимита\n"
         f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
         f"• Irregular verbs: {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день\n"
+        "• Подробная статистика обучения\n"
         "• Чат-тренировка с AI-собеседником\n"
         "• Voice скоро\n"
         "• приоритет для новых функций"
@@ -573,6 +608,105 @@ def build_daily_goal_text(user_id: int) -> str:
         f"• Серия дней: {snapshot['streak']}\n"
         f"• {errors_marker} Закрыть ошибки: {errors_done}/{DAILY_GOAL_ERRORS_TARGET}\n"
         f"• {topic_marker} Пройти тему: {topics_done}/{DAILY_GOAL_TOPICS_TARGET}"
+    )
+
+
+def normalize_stats_word_key(word: str) -> str:
+    return re.sub(r"\s+", " ", (word or "").strip().lower())
+
+
+def get_premium_stats_snapshot(user_id: int) -> dict:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return {}
+
+        mistakes = db.query(UserMistake).filter(UserMistake.telegram_id == user_id)
+        vocab_words = db.query(VocabWord).filter(VocabWord.telegram_id == user_id).all()
+        irregular_count = (
+            db.query(IrregularVerbHistory)
+            .filter(IrregularVerbHistory.telegram_id == user_id)
+            .count()
+        )
+        unique_vocab = {
+            normalize_stats_word_key(item.word)
+            for item in vocab_words
+            if normalize_stats_word_key(item.word)
+        }
+        current_level = normalize_level(user.level)
+        level_topics_total = len(ROADMAP.get(current_level, []))
+        level_topics_done = min(max(user.current_topic_index or 0, 0), level_topics_total)
+        today = ensure_daily_goal_state(user)
+        db.commit()
+
+        return {
+            "premium_status": get_premium_status_text(user_id),
+            "level": level_label(current_level),
+            "streak": visible_streak_count(user, today),
+            "daily_errors_closed": user.daily_goal_errors_closed or 0,
+            "daily_topics_done": user.daily_goal_topics_done or 0,
+            "mistakes_total": mistakes.count(),
+            "mistakes_active": mistakes.filter(UserMistake.status == "active").count(),
+            "mistakes_mastered": mistakes.filter(UserMistake.status == "mastered").count(),
+            "mistake_checks": sum((item.seen_count or 0) for item in mistakes.all()),
+            "vocab_sent_total": len(vocab_words),
+            "vocab_unique_total": len(unique_vocab),
+            "vocab_review_checked": user.vocab_review_checked_count or 0,
+            "vocab_review_correct": user.vocab_review_correct_count or 0,
+            "irregular_sent_total": irregular_count,
+            "level_topics_done": level_topics_done,
+            "level_topics_total": level_topics_total,
+            "roadmap_topics_completed_total": max(user.roadmap_topics_completed_total or 0, level_topics_done),
+            "practice_sessions_completed": user.practice_sessions_completed or 0,
+            "mistake_training_sessions_completed": user.mistake_training_sessions_completed or 0,
+            "chat_sessions_completed": user.chat_sessions_completed or 0,
+            "ai_explanations_completed": user.ai_explanations_completed or 0,
+            "ai_summaries_completed": user.ai_summaries_completed or 0,
+            "ai_quizzes_completed": user.ai_quizzes_completed or 0,
+        }
+    finally:
+        db.close()
+
+
+def build_premium_stats_text(user_id: int) -> str:
+    stats = get_premium_stats_snapshot(user_id)
+    if not stats:
+        return "📊 Статистика\n\nПользователь не найден. Нажмите /start."
+
+    checked = stats["vocab_review_checked"]
+    correct = stats["vocab_review_correct"]
+    review_accuracy = f"{round(correct / checked * 100)}%" if checked else "пока нет"
+
+    return (
+        "📊 Premium статистика\n\n"
+        f"Статус: {stats['premium_status']}\n"
+        f"Уровень: {stats['level']}\n\n"
+        "Серия и цель\n"
+        f"• Серия дней: {stats['streak']}\n"
+        f"• Ошибки сегодня: {stats['daily_errors_closed']}/{DAILY_GOAL_ERRORS_TARGET}\n"
+        f"• Темы сегодня: {stats['daily_topics_done']}/{DAILY_GOAL_TOPICS_TARGET}\n\n"
+        "Путь изучения\n"
+        f"• Тем текущего уровня: {stats['level_topics_done']}/{stats['level_topics_total']}\n"
+        f"• Тем пройдено всего: {stats['roadmap_topics_completed_total']}\n\n"
+        "Слова\n"
+        f"• Ежедневных слов получено: {stats['vocab_sent_total']}\n"
+        f"• Уникальных слов: {stats['vocab_unique_total']}\n"
+        f"• Проверено тестом: {checked}\n"
+        f"• Верно в проверках: {correct} ({review_accuracy})\n"
+        f"• Irregular words получено: {stats['irregular_sent_total']}\n\n"
+        "Ошибки\n"
+        f"• Найдено ошибок: {stats['mistakes_total']}\n"
+        f"• Активных ошибок: {stats['mistakes_active']}\n"
+        f"• Исправлено ошибок: {stats['mistakes_mastered']}\n"
+        f"• Проверок ошибок: {stats['mistake_checks']}\n\n"
+        "Активность\n"
+        f"• AI-разборы: {stats['ai_explanations_completed']}\n"
+        f"• Шпаргалки: {stats['ai_summaries_completed']}\n"
+        f"• Мини-тесты: {stats['ai_quizzes_completed']}\n"
+        f"• Тренировки по теме: {stats['practice_sessions_completed']}\n"
+        f"• Тренировки ошибок: {stats['mistake_training_sessions_completed']}\n"
+        f"• Чат-тренировки: {stats['chat_sessions_completed']}"
     )
 
 
@@ -1670,25 +1804,16 @@ def mode_prompt_text(mode: str) -> str:
 
 def build_main_menu_text(user_id: int) -> str:
     level = level_label(get_level(user_id))
-    words_per_day = get_words_per_day(user_id)
-    words_text = f"{words_per_day} в день" if words_per_day else "не настроено"
-    irregular_text = "включены" if is_irregular_verbs_enabled(user_id) and is_premium(user_id) else "выключены"
     roadmap_status = get_roadmap_status_text(user_id)
     plan = get_premium_status_text(user_id)
-    ai_usage = get_ai_usage_text(user_id)
-    mastered_count = get_mastered_mistakes_count(user_id)
 
     return (
         "✨ English Hub\n"
         "Как учиться: «Путь изучения» — основной маршрут, «Тренировка» — повтор ваших ошибок, «Разбор темы» — помощь по конкретному вопросу.\n\n"
-        "Ваш прогресс\n"
+        "Ваш маршрут\n"
         f"• Тариф: {plan}\n"
-        f"• AI: {ai_usage}\n"
         f"• Уровень: {level}\n"
-        f"• Словарь: {words_text}\n"
-        f"• Неправильные глаголы: {irregular_text}\n"
-        f"• Путь изучения: {roadmap_status}\n"
-        f"• Исправлено ошибок: {mastered_count}\n\n"
+        f"• Путь изучения: {roadmap_status}\n\n"
         f"{build_daily_goal_text(user_id)}\n\n"
         f"💡 {get_phrase()}"
     )
@@ -1743,6 +1868,7 @@ def build_advanced_menu_text() -> str:
         "Здесь собраны функции, которые дают Premium-ценность, а не просто увеличивают лимиты.\n\n"
         "• Чат-тренировка — живой диалог с AI-собеседником\n"
         "• Irregular words — ежедневные неправильные глаголы\n"
+        "• Статистика — ошибки, слова, темы и активность\n"
         "• Голос — скоро"
     )
 
@@ -1890,6 +2016,7 @@ def advanced_menu(user_id: int):
     irregular_label = "🔥 Irregular words" if is_premium(user_id) else "🔥 Irregular words 🔒"
 
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
             InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
@@ -1978,6 +2105,7 @@ def delivery_timezone_kb(current_offset: str):
 
 def premium_kb():
     rows = [
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
         [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="premium_stars")],
     ]
     if is_yookassa_configured():
@@ -1986,6 +2114,13 @@ def premium_kb():
     rows.append([InlineKeyboardButton(text="🧾 Ручная проверка", callback_data="premium_request")])
     rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def premium_stats_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
 
 
 def roadmap_kb():
@@ -2626,6 +2761,11 @@ async def main():
             await message.answer("Проверка слов отменена.", reply_markup=main_menu(user_id))
             return
 
+        increment_user_stats(
+            user_id,
+            vocab_review_checked_count=len(results),
+            vocab_review_correct_count=sum(1 for result in results if result.get("is_correct")),
+        )
         await message.answer(build_vocab_review_summary(results), reply_markup=main_menu(user_id))
 
     async def show_irregular_verbs_settings(message: Message, user_id: int):
@@ -3020,6 +3160,8 @@ async def main():
             results = data.get("practice_results") or []
             user_id = data.get("practice_user_id") or message.from_user.id
             await state.clear()
+            if results:
+                increment_user_stats(user_id, practice_sessions_completed=1)
             await message.answer(build_practice_summary(topic, results), reply_markup=main_menu(user_id))
             return
 
@@ -3107,6 +3249,10 @@ async def main():
                 explanation=feedback,
             )
         await state.clear()
+        if mode == "quiz":
+            increment_user_stats(message.from_user.id, ai_quizzes_completed=1)
+        else:
+            increment_user_stats(message.from_user.id, practice_sessions_completed=1)
         await message.answer(feedback, reply_markup=main_menu(message.from_user.id))
 
     async def send_mistake_training_question(message: Message, state: FSMContext):
@@ -3146,6 +3292,7 @@ async def main():
         total = len(results)
         await state.clear()
         if total:
+            increment_user_stats(user_id, mistake_training_sessions_completed=1)
             await message.answer(
                 f"✅ Тренировка завершена.\n"
                 f"Верно с вариантами: {correct}/{total - reviewed}\n"
@@ -3416,6 +3563,7 @@ async def main():
             db.close()
 
         if topic_completed:
+            increment_user_stats(user_id, roadmap_topics_completed_total=1)
             record_daily_progress(user_id, topics_done=1)
 
         await state.clear()
@@ -3691,6 +3839,15 @@ Mistakes:
                 daily_goal_date="",
                 daily_goal_errors_closed=0,
                 daily_goal_topics_done=0,
+                roadmap_topics_completed_total=0,
+                practice_sessions_completed=0,
+                mistake_training_sessions_completed=0,
+                chat_sessions_completed=0,
+                ai_explanations_completed=0,
+                ai_summaries_completed=0,
+                ai_quizzes_completed=0,
+                vocab_review_checked_count=0,
+                vocab_review_correct_count=0,
                 words_per_day=None,
                 last_vocab_sent_date="",
                 last_vocab_review_sent_date="",
@@ -3827,6 +3984,12 @@ Mistakes:
 
         elif data == "premium":
             await show_premium(call.message, call.from_user.id)
+
+        elif data == "premium_stats":
+            if not is_premium(call.from_user.id):
+                await call.message.answer("🔒 Подробная статистика доступна только в Premium.", reply_markup=premium_kb())
+                return
+            await call.message.edit_text(build_premium_stats_text(call.from_user.id), reply_markup=premium_stats_kb())
 
         elif data == "premium_stars":
             await send_stars_invoice(bot, call.from_user.id)
@@ -3978,7 +4141,12 @@ Mistakes:
             await cancel_action(call.message, state, call.from_user.id)
 
         elif data == "chat_end":
+            state_data = await state.get_data()
+            history = state_data.get("chat_history") or []
+            user_replies = sum(1 for item in history if item.get("role") == "user")
             await state.clear()
+            if user_replies:
+                increment_user_stats(call.from_user.id, chat_sessions_completed=1)
             await call.message.answer(
                 "🏁 Чат-тренировка завершена.\n\nЛучше всего закрепить новые фразы через «Путь изучения» или тренировку ошибок.",
                 reply_markup=main_menu(call.from_user.id),
@@ -4230,11 +4398,14 @@ Mistakes:
                 practice_level=level,
             )
             await state.set_state(StudyFlow.after_topic_result)
+            increment_user_stats(message.from_user.id, ai_explanations_completed=1)
             await message.answer(answer, reply_markup=after_explain_kb())
         elif mode in {"quiz", "practice"}:
             await send_practice_task(message, state, answer, topic, level, mode)
         else:
             await state.clear()
+            if mode == "summary":
+                increment_user_stats(message.from_user.id, ai_summaries_completed=1)
             await message.answer(answer, reply_markup=main_menu(message.from_user.id))
 
     @dp.message(StudyFlow.after_topic_result)
