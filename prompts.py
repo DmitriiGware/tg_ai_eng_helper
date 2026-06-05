@@ -259,6 +259,35 @@ English -> Russian
 """
 
 
+def make_lesson_error_feedback_prompt(
+    level: str,
+    topic: str,
+    task: str,
+    correct_answer: str,
+    user_answer: str,
+    mode: str,
+) -> str:
+    return f"""
+User level: {level}
+Topic: {topic}
+Task: {task}
+Correct answer: {correct_answer}
+User answer: {user_answer}
+Mode: {mode}
+
+Explain the mistake in Russian. Be short and practical.
+
+Rules:
+- Answer only about the current task.
+- Do not repeat the whole lesson.
+- Do not ask unrelated questions.
+- Keep English examples in English.
+- For free_short: maximum 2-3 short sentences.
+- For premium_detailed: include correct answer, short explanation, one example and one similar task.
+- Never exceed the requested length.
+"""
+
+
 def make_chat_start_prompt(user_format: str, level: str) -> str:
     return f"""
 Ты ведёшь premium чат-тренировку английского для русскоязычного ученика.

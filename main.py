@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from aiohttp import web
 from dotenv import load_dotenv
 
-from ai_client import ask_ai
+from ai_client import AI_MODE_FREE, AI_MODE_PREMIUM, ask_ai
 from database.db import SessionLocal, engine, ensure_user_progress_columns
 from database.models import Base, IrregularVerbHistory, RoadmapLessonCache, User, UserMistake, VocabWord
 from glossary import glossary_menu, glossary_text
@@ -25,6 +25,7 @@ from level_tests import get_level_test
 from modes import MODES
 from motivation import get_phrase
 from prompts import (
+    make_lesson_error_feedback_prompt,
     make_chat_reply_prompt,
     make_chat_start_prompt,
     make_premium_error_explanation_prompt,
@@ -36,6 +37,11 @@ from prompts import (
     make_vocab_words_prompt,
 )
 from roadmap import ROADMAP, get_current_topic, update_progress
+from static_lessons import (
+    check_answer,
+    find_static_lesson,
+    lesson_to_practice_bundle,
+)
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -88,11 +94,15 @@ PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 ROADMAP_REVIEW_INTERVAL = 3
 ROADMAP_CACHE_VERSION = "v3"
-ROADMAP_GENERATION_MAX_ATTEMPTS = 3
+ROADMAP_GENERATION_MAX_ATTEMPTS = 5
 ROADMAP_MIN_THEORY_PAGES = 2
 ROADMAP_MAX_THEORY_PAGES = 3
 ROADMAP_MIN_THEORY_WORDS = 180
 ROADMAP_MAX_THEORY_WORDS = 700
+ROADMAP_REPAIR_NOTICE_TEXT = (
+    "Заметил неточность в уроке и аккуратно пересобираю материал. "
+    "Сейчас всё подготовлю."
+)
 DAILY_GOAL_ERRORS_TARGET = 3
 DAILY_GOAL_TOPICS_TARGET = 1
 MASTERED_MISTAKES_PAGE_SIZE = 5
@@ -444,18 +454,13 @@ def get_free_plan_text() -> str:
 
 def get_premium_plan_text() -> str:
     return (
-        "Premium:\n"
-        "• AI-запросы без дневного лимита\n"
-        "• Разборы, тренировки и шпаргалки без лимита\n"
-        "• Premium-разбор ошибок с правилом и мини-заданием\n"
-        "• Путь изучения без лимита\n"
-        f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
-        f"• Irregular verbs: {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день\n"
-        "• Подробная статистика обучения\n"
-        "• Еженедельный отчёт прогресса\n"
+        "Premium даёт больше практики и персональный разбор ошибок:\n"
+        "• AI без дневного лимита\n"
+        "• Подробный разбор ошибок\n"
         "• Чат-тренировка с AI-собеседником\n"
-        "• Voice скоро\n"
-        "• приоритет для новых функций"
+        "• Ежедневные неправильные глаголы\n"
+        "• Статистика и отчёт недели\n"
+        f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
     )
 
 
@@ -659,8 +664,11 @@ def activate_yookassa_payment_sync(payment_id: str) -> tuple[bool, int | None, s
 def premium_limit_text() -> str:
     return (
         "Дневной лимит Free закончился.\n\n"
-        f"{get_free_plan_text()}\n\n"
-        f"{get_premium_plan_text()}"
+        "В Premium можно продолжать без дневного лимита:\n"
+        "• AI-разборы и тренировки\n"
+        "• чат-тренировка\n"
+        "• подробный разбор ошибок\n"
+        "• больше слов в день"
     )
 
 
@@ -1339,6 +1347,18 @@ def save_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplif
         db.close()
 
 
+def delete_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool) -> None:
+    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
+    db = SessionLocal()
+    try:
+        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
+        if cached:
+            db.delete(cached)
+            db.commit()
+    finally:
+        db.close()
+
+
 def encode_options(options: list[str] | None) -> str:
     if not options:
         return ""
@@ -1852,6 +1872,9 @@ def practice_answer_matches(task: dict, user_answer: str) -> bool:
             return True
 
     variants = [correct_answer] + (task.get("acceptable_answers") or [])
+    if check_answer(user_answer, variants):
+        return True
+
     normalized_variants = {normalize_practice_answer(variant) for variant in variants if variant}
     if options:
         answer_without_label = re.sub(r"^[a-dа-г][\).]\s*", "", user_answer or "", flags=re.IGNORECASE)
@@ -1862,7 +1885,17 @@ def practice_answer_matches(task: dict, user_answer: str) -> bool:
 
 
 def format_practice_task(task: dict, index: int, total: int, title: str) -> str:
-    text = f"{title}\n\nЗадание {index + 1}/{total}\n\n{task['question']}"
+    parts = [title, f"Задание {index + 1}/{total}"]
+    theory = (task.get("theory") or "").strip()
+    examples = [str(example).strip() for example in (task.get("examples") or []) if str(example).strip()]
+
+    if theory:
+        parts.append(f"Короткая теория:\n{theory}")
+    if examples:
+        parts.append("Примеры:\n" + "\n".join(f"• {example}" for example in examples[:3]))
+
+    parts.append(f"Мини-задание:\n{task['question']}")
+    text = "\n\n".join(parts)
     options = task.get("options") or []
     if options:
         labels = ["A", "B", "C", "D"]
@@ -1883,6 +1916,41 @@ def build_practice_step_feedback(task: dict, is_correct: bool) -> str:
         f"Правильно: {task['correct_answer']}\n\n"
         f"{explanation}"
     )
+
+
+async def handle_wrong_answer(
+    message: Message,
+    user_id: int,
+    level: str,
+    topic: str,
+    lesson_step: dict,
+    user_answer: str,
+) -> str:
+    free_feedback = build_practice_step_feedback(lesson_step, False)
+    if not is_premium(user_id):
+        await message.answer(free_feedback)
+        return lesson_step.get("explanation") or free_feedback
+
+    allowed, _ = consume_ai_request(user_id)
+    if not allowed:
+        await message.answer(free_feedback)
+        return lesson_step.get("explanation") or free_feedback
+
+    prompt = make_lesson_error_feedback_prompt(
+        level=level,
+        topic=topic,
+        task=lesson_step.get("question") or "",
+        correct_answer=lesson_step.get("correct_answer") or "",
+        user_answer=user_answer,
+        mode=AI_MODE_PREMIUM,
+    )
+    feedback = ask_ai(prompt, level, AI_MODE_PREMIUM)
+    if not feedback or feedback.startswith("⚠️ AI error"):
+        await message.answer(free_feedback)
+        return lesson_step.get("explanation") or free_feedback
+
+    await message.answer(feedback)
+    return feedback
 
 
 def build_practice_summary(topic: str, results: list[dict]) -> str:
@@ -2182,13 +2250,12 @@ def build_practice_menu_text() -> str:
 def build_advanced_menu_text() -> str:
     return (
         "💎 Premium функции\n"
-        "Здесь собраны функции, которые дают Premium-ценность, а не просто увеличивают лимиты.\n\n"
-        "• Чат-тренировка — живой диалог с AI-собеседником\n"
-        "• Irregular words — ежедневные неправильные глаголы\n"
-        "• Статистика — ошибки, слова, темы и активность\n"
-        "• Отчёт недели — прогресс и цель на следующую неделю\n"
-        "• Premium-разбор ошибок — правило и закрепление\n"
-        "• Голос — скоро"
+        "Коротко о том, что открывается после оплаты:\n\n"
+        "💬 Чат-тренировка — диалог с AI\n"
+        "🧠 Разбор ошибок — правило, пример и мини-задание\n"
+        "🔥 Irregular words — 5 глаголов каждый день\n"
+        "📊 Статистика — ошибки, слова и пройденные темы\n"
+        "📬 Отчёт недели — прогресс и следующая цель"
     )
 
 
@@ -2273,11 +2340,10 @@ def build_premium_text(user_id: int) -> str:
         "💎 Premium\n"
         f"Статус: {status}\n"
         f"AI сегодня: {ai_usage}\n\n"
-        f"{get_free_plan_text()}\n\n"
-        f"{get_premium_plan_text()}\n\n"
+        f"{get_premium_plan_text()}\n"
         f"Telegram Stars: {PREMIUM_STARS_PRICE} ⭐\n"
         f"Карта: {yookassa_text}\n"
-        f"Оплата: {PREMIUM_PAYMENT_TEXT}\n\n"
+        f"{PREMIUM_PAYMENT_TEXT}\n\n"
         "Выберите удобный способ оплаты ниже."
     )
 
@@ -2647,7 +2713,16 @@ async def start_web_server(bot: Bot) -> web.AppRunner:
         payment_object = payload.get("object") or {}
         payment_id = object_value(payment_object, "id")
         payment_status = object_value(payment_object, "status")
+        logging.info("YooKassa webhook received: event=%s payment_id=%s status=%s", event, payment_id, payment_status)
         if event != "payment.succeeded" and payment_status != "succeeded":
+            if ADMIN_TELEGRAM_ID:
+                try:
+                    await bot.send_message(
+                        int(ADMIN_TELEGRAM_ID),
+                        f"ℹ️ ЮKassa webhook ignored\nEvent: {event}\nPayment: {payment_id}\nStatus: {payment_status}",
+                    )
+                except Exception as exc:
+                    logging.exception("Failed to notify admin about ignored YooKassa webhook: %s", exc)
             return web.json_response({"ok": True, "ignored": True})
         if not payment_id:
             return web.json_response({"ok": False, "error": "missing_payment_id"}, status=400)
@@ -2671,6 +2746,20 @@ async def start_web_server(bot: Bot) -> web.AppRunner:
             except Exception as exc:
                 logging.exception("Failed to notify user %s about YooKassa payment: %s", user_id, exc)
 
+        if ADMIN_TELEGRAM_ID:
+            try:
+                await bot.send_message(
+                    int(ADMIN_TELEGRAM_ID),
+                    "💳 ЮKassa webhook\n"
+                    f"Payment: {payment_id}\n"
+                    f"Status: {status}\n"
+                    f"User: {user_id}\n"
+                    f"Activated: {activated}\n"
+                    f"Premium until: {premium_until}",
+                )
+            except Exception as exc:
+                logging.exception("Failed to notify admin about YooKassa webhook: %s", exc)
+
         return web.json_response({
             "ok": True,
             "activated": activated,
@@ -2678,8 +2767,16 @@ async def start_web_server(bot: Bot) -> web.AppRunner:
             "status": status,
         })
 
+    async def yookassa_webhook_check(_request: web.Request) -> web.Response:
+        return web.json_response({
+            "ok": True,
+            "webhook": webhook_path,
+            "method": "POST",
+        })
+
     app = web.Application()
     app.router.add_get("/", health)
+    app.router.add_get(webhook_path, yookassa_webhook_check)
     app.router.add_post(webhook_path, yookassa_webhook)
     runner = web.AppRunner(app)
     await runner.setup()
@@ -2789,7 +2886,11 @@ async def main():
 
         save_pending_yookassa_payment(user_id, payment_id, confirmation_url)
         await message.answer(
-            f"💳 Платеж создан.\nСтатус: {status}\nСумма: {PREMIUM_PRICE_RUB} RUB\n\nПосле оплаты вернитесь в бот и нажмите «Проверить оплату».",
+            f"💳 Платёж создан.\n"
+            f"Статус: {status}\n"
+            f"Сумма: {PREMIUM_PRICE_RUB} RUB\n\n"
+            "После оплаты Premium должен включиться автоматически.\n"
+            "Если сообщение не пришло в течение минуты, нажмите «Проверить оплату».",
             reply_markup=yookassa_payment_kb(confirmation_url),
         )
 
@@ -3550,6 +3651,28 @@ async def main():
         )
 
     async def start_generated_practice(message: Message, state: FSMContext, user_id: int, topic: str, level: str):
+        static_lesson = find_static_lesson(topic, level)
+        if static_lesson:
+            bundle = lesson_to_practice_bundle(static_lesson)
+            tasks = bundle["tasks"]
+            if tasks:
+                await state.update_data(
+                    topic=bundle["topic"],
+                    mode="practice",
+                    practice_user_id=user_id,
+                    practice_topic=bundle["topic"],
+                    practice_level=level,
+                    practice_title=bundle["title"],
+                    practice_tasks=tasks,
+                    practice_index=0,
+                    practice_results=[],
+                    practice_task=None,
+                    practice_source="static",
+                )
+                await message.answer("📚 Запускаю готовый микро-урок. AI-запрос не тратится.")
+                await send_practice_step(message, state)
+                return
+
         if not await ensure_ai_quota(message, user_id):
             await state.clear()
             return
@@ -3578,6 +3701,7 @@ async def main():
             practice_index=0,
             practice_results=[],
             practice_task=None,
+            practice_source="ai",
         )
         await send_practice_step(message, state)
 
@@ -3623,7 +3747,17 @@ async def main():
             "is_correct": is_correct,
         })
 
-        if not is_correct:
+        if is_correct:
+            await message.answer(build_practice_step_feedback(task, True))
+        else:
+            feedback = await handle_wrong_answer(
+                message=message,
+                user_id=message.from_user.id,
+                level=level,
+                topic=topic,
+                lesson_step=task,
+                user_answer=user_answer,
+            )
             save_user_mistake(
                 message.from_user.id,
                 get_level(message.from_user.id),
@@ -3632,10 +3766,9 @@ async def main():
                 task["question"],
                 options=task.get("options") or None,
                 correct_answer=task["correct_answer"],
-                explanation=task.get("explanation") or "Повторите правильный вариант и попробуйте ещё раз позже.",
+                explanation=feedback or task.get("explanation") or "Повторите правильный вариант и попробуйте ещё раз позже.",
             )
 
-        await message.answer(build_practice_step_feedback(task, is_correct))
         await state.update_data(
             practice_index=index + 1,
             practice_results=results,
@@ -3824,6 +3957,14 @@ async def main():
         lesson = cached_lesson
         validation = validate_roadmap_lesson(lesson, level_code) if lesson else None
         generated_new_lesson = False
+        repair_notice_sent = False
+
+        async def send_repair_notice() -> None:
+            nonlocal repair_notice_sent
+            if repair_notice_sent:
+                return
+            repair_notice_sent = True
+            await message.answer(ROADMAP_REPAIR_NOTICE_TEXT)
 
         def build_generation_prompt(reasons: list[str] | None = None) -> str:
             if review_due:
@@ -3834,14 +3975,18 @@ async def main():
             if reasons:
                 prompt += (
                     "\n\nКонтроль качества: предыдущий модуль был отклонён.\n"
+                    "Пользователь не должен видеть техническую ошибку, поэтому верни полностью исправленный модуль.\n"
                     "Исправь эти проблемы в новой версии:\n"
                     + "\n".join(f"- {reason}" for reason in reasons[:6])
-                    + "\n\nВерни полностью новый модуль в том же строгом формате."
+                    + "\n\nПроверь себя перед ответом: 2-3 страницы теории, QUIZ, понятные вопросы с контекстом, ANSWER только A/B/C/D."
+                    + "\nВерни полностью новый модуль в том же строгом формате."
                 )
             return prompt
 
         if validation and not validation["valid"]:
             logging.warning("Cached roadmap lesson rejected: %s", "; ".join(validation["reasons"]))
+            if cached_lesson:
+                delete_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify)
             lesson = None
 
         if not lesson:
@@ -3851,6 +3996,8 @@ async def main():
 
             previous_reasons = validation["reasons"] if validation else []
             for attempt in range(ROADMAP_GENERATION_MAX_ATTEMPTS):
+                if previous_reasons:
+                    await send_repair_notice()
                 lesson = ask_ai(
                     build_generation_prompt(previous_reasons if previous_reasons else None),
                     level,
@@ -3871,11 +4018,13 @@ async def main():
 
         if not validation or not validation["valid"]:
             await state.clear()
-            reasons_text = "\n".join(f"• {reason}" for reason in (validation or {}).get("reasons", [])[:5])
-            details = f"\n\nЧто не прошло:\n{reasons_text}" if reasons_text else ""
+            logging.error(
+                "Roadmap lesson generation failed after %s attempts: %s",
+                ROADMAP_GENERATION_MAX_ATTEMPTS,
+                "; ".join((validation or {}).get("reasons", [])),
+            )
             await message.answer(
-                "Не получилось собрать качественный урок. Попробуйте запустить путь изучения ещё раз."
-                f"{details}",
+                "Я поймал неточность и не хочу показывать сырой урок. Попробуйте ещё раз через минуту — соберу свежий вариант.",
                 reply_markup=roadmap_kb(),
             )
             return
@@ -4854,7 +5003,8 @@ Mistakes:
         prompt = make_user_prompt(topic, mode, level)
 
         try:
-            answer = ask_ai(prompt, level, mode)
+            ai_mode = mode if is_premium(message.from_user.id) else AI_MODE_FREE
+            answer = ask_ai(prompt, level, ai_mode)
         except Exception as exc:
             await state.clear()
             await message.answer(f"Ошибка: {exc}")
