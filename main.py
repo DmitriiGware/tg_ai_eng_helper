@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery
+from aiohttp import web
 from dotenv import load_dotenv
 
 from ai_client import ask_ai
@@ -26,6 +27,7 @@ from motivation import get_phrase
 from prompts import (
     make_chat_reply_prompt,
     make_chat_start_prompt,
+    make_premium_error_explanation_prompt,
     make_practice_check_prompt,
     make_practice_task_prompt,
     make_roadmap_lesson_prompt,
@@ -44,14 +46,18 @@ PREMIUM_PAYMENT_TEXT = (os.getenv("PREMIUM_PAYMENT_TEXT") or "Способ оп�
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 YOOKASSA_RETURN_URL = (os.getenv("YOOKASSA_RETURN_URL") or "https://t.me/").strip()
+YOOKASSA_WEBHOOK_PATH = (os.getenv("YOOKASSA_WEBHOOK_PATH") or "/yookassa/webhook").strip()
 PREMIUM_PRICE_RUB = (os.getenv("PREMIUM_PRICE_RUB") or "299.00").strip()
 PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "150").strip())
+WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
+WEB_SERVER_PORT = int((os.getenv("PORT") or os.getenv("WEB_SERVER_PORT") or "8080").strip())
 
 DEFAULT_LEVEL = "A1"
 DEFAULT_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 DAILY_MISTAKE_HOUR = 18
 DAILY_IRREGULAR_VERBS_HOUR = 19
+WEEKLY_REPORT_HOUR = 12
 DEFAULT_TIMEZONE_OFFSET = "+03:00"
 DELIVERY_HOURS = list(range(8, 23))
 TIMEZONE_OPTIONS = [
@@ -216,6 +222,11 @@ def user_local_today(user: User) -> str:
     return user_local_datetime(user).date().isoformat()
 
 
+def user_week_key(user: User) -> str:
+    year, week, _ = user_local_datetime(user).date().isocalendar()
+    return f"{year}-W{week:02d}"
+
+
 def ensure_daily_goal_state(user: User) -> str:
     today = user_local_today(user)
     if user.daily_goal_date != today:
@@ -223,6 +234,22 @@ def ensure_daily_goal_state(user: User) -> str:
         user.daily_goal_errors_closed = 0
         user.daily_goal_topics_done = 0
     return today
+
+
+def ensure_weekly_stats_state(user: User) -> str:
+    week_key = user_week_key(user)
+    if user.weekly_stats_key != week_key:
+        user.weekly_stats_key = week_key
+        user.weekly_roadmap_topics_done = 0
+        user.weekly_practice_sessions = 0
+        user.weekly_mistake_training_sessions = 0
+        user.weekly_chat_sessions = 0
+        user.weekly_ai_explanations = 0
+        user.weekly_ai_summaries = 0
+        user.weekly_ai_quizzes = 0
+        user.weekly_vocab_review_checked = 0
+        user.weekly_vocab_review_correct = 0
+    return week_key
 
 
 def refresh_user_streak(user: User, today: str) -> None:
@@ -307,9 +334,25 @@ def increment_user_stats(user_id: int, **increments: int) -> None:
         if not user:
             return
 
+        ensure_weekly_stats_state(user)
+        weekly_fields = {
+            "roadmap_topics_completed_total": "weekly_roadmap_topics_done",
+            "practice_sessions_completed": "weekly_practice_sessions",
+            "mistake_training_sessions_completed": "weekly_mistake_training_sessions",
+            "chat_sessions_completed": "weekly_chat_sessions",
+            "ai_explanations_completed": "weekly_ai_explanations",
+            "ai_summaries_completed": "weekly_ai_summaries",
+            "ai_quizzes_completed": "weekly_ai_quizzes",
+            "vocab_review_checked_count": "weekly_vocab_review_checked",
+            "vocab_review_correct_count": "weekly_vocab_review_correct",
+        }
         for field, value in increments.items():
             current = getattr(user, field, 0) or 0
             setattr(user, field, max(current + int(value), 0))
+            weekly_field = weekly_fields.get(field)
+            if weekly_field:
+                weekly_current = getattr(user, weekly_field, 0) or 0
+                setattr(user, weekly_field, max(weekly_current + int(value), 0))
         db.commit()
     finally:
         db.close()
@@ -404,10 +447,12 @@ def get_premium_plan_text() -> str:
         "Premium:\n"
         "• AI-запросы без дневного лимита\n"
         "• Разборы, тренировки и шпаргалки без лимита\n"
+        "• Premium-разбор ошибок с правилом и мини-заданием\n"
         "• Путь изучения без лимита\n"
         f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
         f"• Irregular verbs: {IRREGULAR_VERBS_PER_DAY} неправильных глаголов в день\n"
         "• Подробная статистика обучения\n"
+        "• Еженедельный отчёт прогресса\n"
         "• Чат-тренировка с AI-собеседником\n"
         "• Voice скоро\n"
         "• приоритет для новых функций"
@@ -454,6 +499,30 @@ def grant_premium(user_id: int, days: int = DEFAULT_PREMIUM_DAYS) -> str | None:
         user.premium_until = (base_date + timedelta(days=days)).isoformat()
         db.commit()
         return user.premium_until
+    finally:
+        db.close()
+
+
+def grant_premium_from_yookassa_payment(user_id: int, payment_id: str, days: int = DEFAULT_PREMIUM_DAYS) -> tuple[bool, str | None]:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return False, None
+        if user.last_yookassa_payment_id == payment_id:
+            return False, user.premium_until
+
+        base_date = datetime.now().date()
+        if is_premium_user(user):
+            base_date = datetime.strptime(user.premium_until, "%Y-%m-%d").date()
+
+        user.premium_until = (base_date + timedelta(days=days)).isoformat()
+        user.last_yookassa_payment_id = payment_id
+        if user.pending_yookassa_payment_id == payment_id:
+            user.pending_yookassa_payment_id = ""
+            user.pending_yookassa_payment_url = ""
+        db.commit()
+        return True, user.premium_until
     finally:
         db.close()
 
@@ -538,7 +607,7 @@ def create_yookassa_payment_sync(user_id: int) -> tuple[str, str, str]:
     return object_value(payment, "id"), object_value(payment, "status"), confirmation_url
 
 
-def get_yookassa_payment_status_sync(payment_id: str) -> str:
+def get_yookassa_payment_info_sync(payment_id: str) -> dict:
     if not is_yookassa_configured():
         raise RuntimeError("YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY are not configured.")
 
@@ -549,7 +618,42 @@ def get_yookassa_payment_status_sync(payment_id: str) -> str:
 
     Configuration.configure(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
     payment = Payment.find_one(payment_id)
-    return object_value(payment, "status") or ""
+    metadata = object_value(payment, "metadata") or {}
+    return {
+        "id": object_value(payment, "id") or payment_id,
+        "status": object_value(payment, "status") or "",
+        "metadata": metadata if isinstance(metadata, dict) else {},
+    }
+
+
+def get_yookassa_payment_status_sync(payment_id: str) -> str:
+    return get_yookassa_payment_info_sync(payment_id)["status"]
+
+
+def activate_yookassa_payment_sync(payment_id: str) -> tuple[bool, int | None, str | None, str]:
+    payment_info = get_yookassa_payment_info_sync(payment_id)
+    status = payment_info["status"]
+    if status != "succeeded":
+        return False, None, None, status
+
+    metadata = payment_info.get("metadata") or {}
+    if metadata.get("product") != "premium":
+        return False, None, None, "unsupported_product"
+
+    try:
+        user_id = int(metadata.get("telegram_id") or 0)
+    except (TypeError, ValueError):
+        return False, None, None, "missing_telegram_id"
+    if not user_id:
+        return False, None, None, "missing_telegram_id"
+
+    try:
+        days = int(metadata.get("days") or DEFAULT_PREMIUM_DAYS)
+    except (TypeError, ValueError):
+        days = DEFAULT_PREMIUM_DAYS
+
+    activated, premium_until = grant_premium_from_yookassa_payment(user_id, payment_id, days)
+    return activated, user_id, premium_until, "succeeded"
 
 
 def premium_limit_text() -> str:
@@ -708,6 +812,134 @@ def build_premium_stats_text(user_id: int) -> str:
         f"• Тренировки ошибок: {stats['mistake_training_sessions_completed']}\n"
         f"• Чат-тренировки: {stats['chat_sessions_completed']}"
     )
+
+
+def parse_date_prefix(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value[:10]).date()
+    except ValueError:
+        return None
+
+
+def is_date_in_range(value: str | None, start_date, end_date) -> bool:
+    item_date = parse_date_prefix(value)
+    return bool(item_date and start_date <= item_date <= end_date)
+
+
+def build_weekly_goal_text(active_errors: int, topics_done: int, topics_total: int, checked_words: int) -> str:
+    if active_errors >= DAILY_GOAL_ERRORS_TARGET:
+        return "закрыть 3 старые ошибки в тренировке"
+    if topics_done < topics_total:
+        return "пройти 1 тему в пути изучения"
+    if checked_words < VOCAB_REVIEW_WORDS_COUNT:
+        return "пройти проверку словаря"
+    return "поддержать серию и сделать 2 короткие тренировки"
+
+
+def build_weekly_report_text(user_id: int) -> str:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return "📬 Отчёт недели\n\nПользователь не найден. Нажмите /start."
+
+        today = user_local_datetime(user).date()
+        start_date = today - timedelta(days=6)
+
+        vocab_words = db.query(VocabWord).filter(VocabWord.telegram_id == user_id).all()
+        irregular_rows = db.query(IrregularVerbHistory).filter(IrregularVerbHistory.telegram_id == user_id).all()
+        mistakes = db.query(UserMistake).filter(UserMistake.telegram_id == user_id).all()
+
+        weekly_words = [item for item in vocab_words if is_date_in_range(item.sent_date, start_date, today)]
+        weekly_irregular = [item for item in irregular_rows if is_date_in_range(item.sent_date, start_date, today)]
+        weekly_new_mistakes = [item for item in mistakes if is_date_in_range(item.created_at, start_date, today)]
+        weekly_checked_mistakes = [item for item in mistakes if is_date_in_range(item.last_seen_at, start_date, today)]
+
+        active_mistakes = [item for item in mistakes if item.status == "active"]
+        mastered_mistakes = [item for item in mistakes if item.status == "mastered"]
+        weak_topics = {}
+        for mistake in active_mistakes:
+            topic = format_topic_title(mistake.topic or "без темы")
+            weak_topics[topic] = weak_topics.get(topic, 0) + 1
+        weak_list = sorted(weak_topics.items(), key=lambda item: item[1], reverse=True)[:3]
+        weak_text = ", ".join(f"{topic} ({count})" for topic, count in weak_list) if weak_list else "критичных слабых мест пока нет"
+
+        current_level = normalize_level(user.level)
+        topics_total = len(ROADMAP.get(current_level, []))
+        topics_done = min(max(user.current_topic_index or 0, 0), topics_total)
+        checked_words = user.weekly_vocab_review_checked or 0
+        correct_words = user.weekly_vocab_review_correct or 0
+        vocab_accuracy = f"{round(correct_words / checked_words * 100)}%" if checked_words else "пока нет"
+        next_goal = build_weekly_goal_text(len(active_mistakes), topics_done, topics_total, checked_words)
+
+        db.commit()
+        return (
+            "📬 Premium-отчёт недели\n"
+            f"Период: {start_date.isoformat()} — {today.isoformat()}\n\n"
+            "Главное\n"
+            f"• Серия дней: {visible_streak_count(user, user_local_today(user))}\n"
+            f"• Темы пути: {topics_done}/{topics_total}\n"
+            f"• Цель на неделю: {next_goal}\n\n"
+            "Прогресс за неделю\n"
+            f"• Пройдено тем: {user.weekly_roadmap_topics_done or 0}\n"
+            f"• Тренировок по теме: {user.weekly_practice_sessions or 0}\n"
+            f"• Тренировок ошибок: {user.weekly_mistake_training_sessions or 0}\n"
+            f"• Чат-тренировок: {user.weekly_chat_sessions or 0}\n"
+            f"• AI-разборов: {user.weekly_ai_explanations or 0}\n"
+            f"• Шпаргалок: {user.weekly_ai_summaries or 0}\n"
+            f"• Мини-тестов: {user.weekly_ai_quizzes or 0}\n\n"
+            "Слова\n"
+            f"• Новых слов: {len(weekly_words)}\n"
+            f"• Irregular words: {len(weekly_irregular)}\n"
+            f"• Проверено слов: {checked_words}\n"
+            f"• Верно в проверке: {correct_words} ({vocab_accuracy})\n\n"
+            "Ошибки\n"
+            f"• Новых ошибок найдено: {len(weekly_new_mistakes)}\n"
+            f"• Ошибок повторено: {len(weekly_checked_mistakes)}\n"
+            f"• Активных ошибок сейчас: {len(active_mistakes)}\n"
+            f"• Исправлено ошибок всего: {len(mastered_mistakes)}\n"
+            f"• Слабые места: {weak_text}"
+        )
+    finally:
+        db.close()
+
+
+def is_weekly_report_due(user: User) -> bool:
+    if not is_premium_user(user):
+        return False
+
+    local_now = user_local_datetime(user)
+    if local_now.hour < WEEKLY_REPORT_HOUR:
+        return False
+
+    last_sent = parse_date_prefix(user.last_weekly_report_sent_date)
+    if not last_sent:
+        return True
+    return (local_now.date() - last_sent).days >= 7
+
+
+def mark_weekly_report_sent(user_id: int) -> None:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return
+        user.last_weekly_report_sent_date = user_local_today(user)
+        user.weekly_stats_key = user_week_key(user)
+        user.weekly_roadmap_topics_done = 0
+        user.weekly_practice_sessions = 0
+        user.weekly_mistake_training_sessions = 0
+        user.weekly_chat_sessions = 0
+        user.weekly_ai_explanations = 0
+        user.weekly_ai_summaries = 0
+        user.weekly_ai_quizzes = 0
+        user.weekly_vocab_review_checked = 0
+        user.weekly_vocab_review_correct = 0
+        db.commit()
+    finally:
+        db.close()
 
 
 def is_irregular_verbs_enabled(user_id: int) -> bool:
@@ -1132,10 +1364,10 @@ def save_user_mistake(
     correct_answer: str = "",
     explanation: str = "",
     options: list[str] | None = None,
-) -> None:
+) -> int | None:
     question = (question or "").strip()
     if not question:
-        return
+        return None
 
     db = SessionLocal()
     try:
@@ -1157,10 +1389,10 @@ def save_user_mistake(
             existing.options = encode_options(options)
             existing.correct_streak = 0
             db.commit()
-            return
+            return existing.id
 
         now = now_key()
-        db.add(UserMistake(
+        mistake = UserMistake(
             telegram_id=user_id,
             level=normalize_level(level),
             source=source,
@@ -1174,8 +1406,10 @@ def save_user_mistake(
             correct_streak=0,
             created_at=now,
             last_seen_at="",
-        ))
+        )
+        db.add(mistake)
         db.commit()
+        return mistake.id
     finally:
         db.close()
 
@@ -1246,6 +1480,89 @@ def get_mistake_by_id(user_id: int, mistake_id: int) -> dict | None:
         }
     finally:
         db.close()
+
+
+def update_mistake_explanation(mistake_id: int, explanation: str) -> None:
+    explanation = (explanation or "").strip()
+    if not explanation:
+        return
+
+    db = SessionLocal()
+    try:
+        mistake = db.query(UserMistake).filter(UserMistake.id == mistake_id).first()
+        if not mistake:
+            return
+        mistake.explanation = explanation
+        db.commit()
+    finally:
+        db.close()
+
+
+def should_generate_premium_error_explanation(mistake: dict, is_correct: bool) -> bool:
+    if is_correct:
+        return False
+    explanation = mistake.get("explanation") or ""
+    return "Premium-разбор" not in explanation
+
+
+def selected_mistake_answer(mistake: dict, selected_index: int) -> str:
+    options = mistake.get("options") or []
+    if 0 <= selected_index < len(options):
+        return options[selected_index]
+    return "нет ответа"
+
+
+def generate_premium_error_explanation(user_id: int, mistake: dict, selected_index: int) -> str | None:
+    if not is_premium(user_id):
+        return None
+    if not should_generate_premium_error_explanation(mistake, False):
+        return None
+    if not consume_ai_request(user_id)[0]:
+        return None
+
+    level = level_label(mistake.get("level") or get_level(user_id))
+    prompt = make_premium_error_explanation_prompt(
+        level=level,
+        topic=mistake.get("topic") or "ошибка",
+        question=mistake.get("question") or "",
+        user_answer=selected_mistake_answer(mistake, selected_index),
+        correct_answer=mistake.get("correct_answer") or "",
+        base_explanation=mistake.get("explanation") or "",
+    )
+    explanation = ask_ai(prompt, level, "premium_error")
+    if not explanation or explanation.startswith("⚠️ AI error"):
+        return None
+
+    update_mistake_explanation(mistake["id"], explanation)
+    mistake["explanation"] = explanation
+    return explanation
+
+
+def generate_premium_explanation_for_saved_mistake(
+    user_id: int,
+    mistake_id: int | None,
+    level: str,
+    source: str,
+    topic: str,
+    question: str,
+    options: list[str],
+    selected_index: int,
+    correct_answer: str,
+    base_explanation: str = "",
+) -> str | None:
+    if not mistake_id:
+        return None
+    mistake = {
+        "id": mistake_id,
+        "level": level,
+        "source": source,
+        "topic": topic,
+        "question": question,
+        "options": options,
+        "correct_answer": correct_answer,
+        "explanation": base_explanation,
+    }
+    return generate_premium_error_explanation(user_id, mistake, selected_index)
 
 
 def get_active_mistakes_count(user_id: int) -> int:
@@ -1869,6 +2186,8 @@ def build_advanced_menu_text() -> str:
         "• Чат-тренировка — живой диалог с AI-собеседником\n"
         "• Irregular words — ежедневные неправильные глаголы\n"
         "• Статистика — ошибки, слова, темы и активность\n"
+        "• Отчёт недели — прогресс и цель на следующую неделю\n"
+        "• Premium-разбор ошибок — правило и закрепление\n"
         "• Голос — скоро"
     )
 
@@ -2016,7 +2335,10 @@ def advanced_menu(user_id: int):
     irregular_label = "🔥 Irregular words" if is_premium(user_id) else "🔥 Irregular words 🔒"
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats"),
+            InlineKeyboardButton(text="📬 Отчёт недели", callback_data="weekly_report"),
+        ],
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
             InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
@@ -2106,6 +2428,7 @@ def delivery_timezone_kb(current_offset: str):
 def premium_kb():
     rows = [
         [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
+        [InlineKeyboardButton(text="📬 Отчёт недели", callback_data="weekly_report")],
         [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="premium_stars")],
     ]
     if is_yookassa_configured():
@@ -2118,6 +2441,14 @@ def premium_kb():
 
 def premium_stats_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def weekly_report_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
         [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -2299,6 +2630,65 @@ async def notify_bot_started(bot: Bot) -> None:
         logging.exception("Failed to send startup notification: %s", exc)
 
 
+async def start_web_server(bot: Bot) -> web.AppRunner:
+    webhook_path = YOOKASSA_WEBHOOK_PATH if YOOKASSA_WEBHOOK_PATH.startswith("/") else f"/{YOOKASSA_WEBHOOK_PATH}"
+
+    async def health(_request: web.Request) -> web.Response:
+        return web.json_response({"ok": True})
+
+    async def yookassa_webhook(request: web.Request) -> web.Response:
+        try:
+            payload = await request.json()
+        except Exception:
+            logging.exception("YooKassa webhook: invalid JSON")
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        event = payload.get("event")
+        payment_object = payload.get("object") or {}
+        payment_id = object_value(payment_object, "id")
+        payment_status = object_value(payment_object, "status")
+        if event != "payment.succeeded" and payment_status != "succeeded":
+            return web.json_response({"ok": True, "ignored": True})
+        if not payment_id:
+            return web.json_response({"ok": False, "error": "missing_payment_id"}, status=400)
+
+        try:
+            activated, user_id, premium_until, status = await asyncio.to_thread(
+                activate_yookassa_payment_sync,
+                payment_id,
+            )
+        except Exception as exc:
+            logging.exception("YooKassa webhook failed for payment %s: %s", payment_id, exc)
+            return web.json_response({"ok": False, "error": "activation_failed"}, status=500)
+
+        if activated and user_id:
+            try:
+                await bot.send_message(
+                    user_id,
+                    f"✅ Оплата ЮKassa прошла. Premium активирован до {premium_until}.",
+                    reply_markup=main_menu(user_id),
+                )
+            except Exception as exc:
+                logging.exception("Failed to notify user %s about YooKassa payment: %s", user_id, exc)
+
+        return web.json_response({
+            "ok": True,
+            "activated": activated,
+            "user_id": user_id,
+            "status": status,
+        })
+
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_post(webhook_path, yookassa_webhook)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, WEB_SERVER_HOST, WEB_SERVER_PORT)
+    await site.start()
+    logging.info("Web server started on %s:%s%s", WEB_SERVER_HOST, WEB_SERVER_PORT, webhook_path)
+    return runner
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
     Base.metadata.create_all(bind=engine)
@@ -2410,15 +2800,20 @@ async def main():
             return
 
         try:
-            status = await asyncio.to_thread(get_yookassa_payment_status_sync, payment_id)
+            activated, _, premium_until, status = await asyncio.to_thread(activate_yookassa_payment_sync, payment_id)
         except Exception as exc:
             logging.exception("Failed to check YooKassa payment: %s", exc)
             await message.answer(f"Не получилось проверить платеж ЮKassa: {exc}", reply_markup=premium_kb())
             return
 
         if status == "succeeded":
-            premium_until = grant_premium(user_id, DEFAULT_PREMIUM_DAYS)
-            clear_pending_yookassa_payment(user_id)
+            if not activated:
+                clear_pending_yookassa_payment(user_id)
+                await message.answer(
+                    f"✅ Оплата уже была обработана. Premium активен до {premium_until}.",
+                    reply_markup=main_menu(user_id),
+                )
+                return
             await message.answer(
                 f"✅ Оплата прошла. Premium активирован до {premium_until}.",
                 reply_markup=main_menu(user_id),
@@ -3048,6 +3443,43 @@ async def main():
 
             await asyncio.sleep(3600)
 
+    async def send_weekly_report(bot: Bot, user_id: int, force: bool = False) -> bool:
+        db = SessionLocal()
+        try:
+            user = db.query(User).filter(User.telegram_id == user_id).first()
+            if not user:
+                return False
+            if not force and not is_weekly_report_due(user):
+                return False
+        finally:
+            db.close()
+
+        await bot.send_message(
+            user_id,
+            build_weekly_report_text(user_id),
+            reply_markup=weekly_report_kb(),
+        )
+        if not force:
+            mark_weekly_report_sent(user_id)
+        return True
+
+    async def weekly_report_loop(bot: Bot):
+        while True:
+            try:
+                db = SessionLocal()
+                users = db.query(User).all()
+                db.close()
+
+                for user in users:
+                    try:
+                        await send_weekly_report(bot, user.telegram_id)
+                    except Exception as exc:
+                        logging.exception("Failed to send weekly report to %s: %s", user.telegram_id, exc)
+            except Exception as exc:
+                logging.exception("Weekly report loop failed: %s", exc)
+
+            await asyncio.sleep(3600)
+
     async def start_chat_training(message: Message, state: FSMContext, user_id: int, user_format: str, level: str):
         if not await ensure_ai_quota(message, user_id):
             await state.clear()
@@ -3318,6 +3750,8 @@ async def main():
         options = mistake.get("options") or []
         correct_answer = mistake.get("correct_answer")
         is_correct = 0 <= selected_index < len(options) and options[selected_index] == correct_answer
+        if not is_correct:
+            generate_premium_error_explanation(call.from_user.id, mistake, selected_index)
         result = update_mistake_result(mistake["id"], is_correct)
         results.append("correct" if is_correct else "wrong")
         await call.message.edit_reply_markup(reply_markup=None)
@@ -3347,6 +3781,8 @@ async def main():
         options = mistake.get("options") or []
         correct_answer = mistake.get("correct_answer")
         is_correct = 0 <= selected_index < len(options) and options[selected_index] == correct_answer
+        if not is_correct:
+            generate_premium_error_explanation(call.from_user.id, mistake, selected_index)
         result = update_mistake_result(mistake_id, is_correct)
         await call.message.edit_reply_markup(reply_markup=None)
         await call.message.answer(
@@ -3598,7 +4034,7 @@ async def main():
                     await call.message.answer("User not found. Please use /start first.")
                     return
 
-                save_user_mistake(
+                mistake_id = save_user_mistake(
                     call.from_user.id,
                     user.level,
                     roadmap_kind,
@@ -3607,6 +4043,18 @@ async def main():
                     correct_answer=question["options"][correct_index],
                     explanation=question.get("explanation", ""),
                     options=question.get("options", []),
+                )
+                premium_explanation = generate_premium_explanation_for_saved_mistake(
+                    call.from_user.id,
+                    mistake_id,
+                    user.level,
+                    roadmap_kind,
+                    topic,
+                    question["question"],
+                    question.get("options", []),
+                    selected_index,
+                    question["options"][correct_index],
+                    question.get("explanation", ""),
                 )
 
                 if roadmap_kind == "review":
@@ -3624,8 +4072,11 @@ async def main():
                 roadmap_theory_index=0,
             )
             await state.set_state(StudyFlow.viewing_roadmap_lesson)
+            wrong_text = build_roadmap_wrong_answer_text(question, selected_index)
+            if premium_explanation:
+                wrong_text += f"\n\n{premium_explanation}"
             await call.message.answer(
-                build_roadmap_wrong_answer_text(question, selected_index),
+                wrong_text,
                 reply_markup=roadmap_wrong_answer_kb(),
             )
             return
@@ -3848,6 +4299,17 @@ Mistakes:
                 ai_quizzes_completed=0,
                 vocab_review_checked_count=0,
                 vocab_review_correct_count=0,
+                weekly_stats_key="",
+                weekly_roadmap_topics_done=0,
+                weekly_practice_sessions=0,
+                weekly_mistake_training_sessions=0,
+                weekly_chat_sessions=0,
+                weekly_ai_explanations=0,
+                weekly_ai_summaries=0,
+                weekly_ai_quizzes=0,
+                weekly_vocab_review_checked=0,
+                weekly_vocab_review_correct=0,
+                last_weekly_report_sent_date="",
                 words_per_day=None,
                 last_vocab_sent_date="",
                 last_vocab_review_sent_date="",
@@ -3863,6 +4325,7 @@ Mistakes:
                 ai_requests_count=0,
                 pending_yookassa_payment_id="",
                 pending_yookassa_payment_url="",
+                last_yookassa_payment_id="",
                 last_telegram_payment_charge_id="",
             )
             db.add(user)
@@ -3990,6 +4453,12 @@ Mistakes:
                 await call.message.answer("🔒 Подробная статистика доступна только в Premium.", reply_markup=premium_kb())
                 return
             await call.message.edit_text(build_premium_stats_text(call.from_user.id), reply_markup=premium_stats_kb())
+
+        elif data == "weekly_report":
+            if not is_premium(call.from_user.id):
+                await call.message.answer("🔒 Еженедельный отчёт доступен только в Premium.", reply_markup=premium_kb())
+                return
+            await call.message.edit_text(build_weekly_report_text(call.from_user.id), reply_markup=weekly_report_kb())
 
         elif data == "premium_stars":
             await send_stars_invoice(bot, call.from_user.id)
@@ -4508,6 +4977,8 @@ Mistakes:
     asyncio.create_task(vocab_daily_loop(bot))
     asyncio.create_task(mistake_daily_loop(bot))
     asyncio.create_task(irregular_verbs_daily_loop(bot))
+    asyncio.create_task(weekly_report_loop(bot))
+    await start_web_server(bot)
     await notify_bot_started(bot)
     await dp.start_polling(bot)
 

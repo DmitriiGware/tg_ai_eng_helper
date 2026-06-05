@@ -1,4 +1,5 @@
 aiogram==3.21.0
+aiohttp
 python-dotenv
 groq
 sqlalchemy

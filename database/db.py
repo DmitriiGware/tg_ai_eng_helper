@@ -126,6 +126,61 @@ def ensure_user_progress_columns():
                 "ALTER TABLE users ADD COLUMN vocab_review_correct_count INTEGER DEFAULT 0"
             )
 
+        if "weekly_stats_key" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_stats_key VARCHAR DEFAULT ''"
+            )
+
+        if "weekly_roadmap_topics_done" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_roadmap_topics_done INTEGER DEFAULT 0"
+            )
+
+        if "weekly_practice_sessions" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_practice_sessions INTEGER DEFAULT 0"
+            )
+
+        if "weekly_mistake_training_sessions" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_mistake_training_sessions INTEGER DEFAULT 0"
+            )
+
+        if "weekly_chat_sessions" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_chat_sessions INTEGER DEFAULT 0"
+            )
+
+        if "weekly_ai_explanations" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_ai_explanations INTEGER DEFAULT 0"
+            )
+
+        if "weekly_ai_summaries" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_ai_summaries INTEGER DEFAULT 0"
+            )
+
+        if "weekly_ai_quizzes" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_ai_quizzes INTEGER DEFAULT 0"
+            )
+
+        if "weekly_vocab_review_checked" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_vocab_review_checked INTEGER DEFAULT 0"
+            )
+
+        if "weekly_vocab_review_correct" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN weekly_vocab_review_correct INTEGER DEFAULT 0"
+            )
+
+        if "last_weekly_report_sent_date" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_weekly_report_sent_date VARCHAR DEFAULT ''"
+            )
+
         if "words_per_day" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN words_per_day INTEGER"
@@ -199,6 +254,11 @@ def ensure_user_progress_columns():
         if "pending_yookassa_payment_url" not in columns:
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN pending_yookassa_payment_url VARCHAR DEFAULT ''"
+            )
+
+        if "last_yookassa_payment_id" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN last_yookassa_payment_id VARCHAR DEFAULT ''"
             )
 
         if "last_telegram_payment_charge_id" not in columns:
