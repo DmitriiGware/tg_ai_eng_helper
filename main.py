@@ -57,7 +57,7 @@ YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 YOOKASSA_RETURN_URL = (os.getenv("YOOKASSA_RETURN_URL") or "https://t.me/").strip()
 YOOKASSA_WEBHOOK_PATH = (os.getenv("YOOKASSA_WEBHOOK_PATH") or "/yookassa/webhook").strip()
 PREMIUM_PRICE_RUB = (os.getenv("PREMIUM_PRICE_RUB") or "150.00").strip()
-PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "150").strip())
+PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "75").strip())
 WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
 WEB_SERVER_PORT = int((os.getenv("PORT") or os.getenv("WEB_SERVER_PORT") or "8080").strip())
 
@@ -92,6 +92,32 @@ RECENT_IRREGULAR_VERBS_HISTORY_LIMIT = 60
 IRREGULAR_VERBS_PER_DAY = 5
 FREE_DAILY_AI_LIMIT = 5
 DEFAULT_PREMIUM_DAYS = 30
+PREMIUM_PLANS = {
+    "1m": {
+        "label": "1 месяц",
+        "days": DEFAULT_PREMIUM_DAYS,
+        "rub": PREMIUM_PRICE_RUB,
+        "stars": PREMIUM_STARS_PRICE,
+    },
+    "3m": {
+        "label": "3 месяца",
+        "days": 90,
+        "rub": (os.getenv("PREMIUM_PRICE_RUB_3M") or "399.00").strip(),
+        "stars": int((os.getenv("PREMIUM_STARS_PRICE_3M") or "199").strip()),
+    },
+    "6m": {
+        "label": "6 месяцев",
+        "days": 180,
+        "rub": (os.getenv("PREMIUM_PRICE_RUB_6M") or "749.00").strip(),
+        "stars": int((os.getenv("PREMIUM_STARS_PRICE_6M") or "369").strip()),
+    },
+    "12m": {
+        "label": "1 год",
+        "days": 365,
+        "rub": (os.getenv("PREMIUM_PRICE_RUB_12M") or "1390.00").strip(),
+        "stars": int((os.getenv("PREMIUM_STARS_PRICE_12M") or "679").strip()),
+    },
+}
 ROADMAP_REVIEW_INTERVAL = 3
 ROADMAP_FINAL_TEST_QUESTIONS = 10
 ROADMAP_FINAL_TEST_PASS_SCORE = 8
@@ -687,6 +713,24 @@ def clear_pending_yookassa_payment(user_id: int) -> None:
         db.close()
 
 
+def get_premium_plan(plan_key: str | None) -> dict:
+    return PREMIUM_PLANS.get(plan_key or "1m", PREMIUM_PLANS["1m"])
+
+
+def format_rub_price(value: str) -> str:
+    try:
+        number = float(value)
+    except ValueError:
+        return f"{value} ₽"
+    if number.is_integer():
+        return f"{int(number)} ₽"
+    return f"{number:.2f} ₽"
+
+
+def format_premium_plan_line(plan_key: str, plan: dict) -> str:
+    return f"• {plan['label']}: {format_rub_price(plan['rub'])} или {plan['stars']} ⭐"
+
+
 def save_telegram_payment_charge(user_id: int, charge_id: str) -> None:
     db = SessionLocal()
     try:
@@ -698,7 +742,7 @@ def save_telegram_payment_charge(user_id: int, charge_id: str) -> None:
         db.close()
 
 
-def create_yookassa_payment_sync(user_id: int) -> tuple[str, str, str]:
+def create_yookassa_payment_sync(user_id: int, plan_key: str = "1m") -> tuple[str, str, str]:
     if not is_yookassa_configured():
         raise RuntimeError("YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY are not configured.")
 
@@ -707,11 +751,13 @@ def create_yookassa_payment_sync(user_id: int) -> tuple[str, str, str]:
     except ImportError as exc:
         raise RuntimeError("Package yookassa is not installed. Run: pip install yookassa") from exc
 
+    plan = get_premium_plan(plan_key)
+    normalized_plan_key = plan_key if plan_key in PREMIUM_PLANS else "1m"
     Configuration.configure(YOOKASSA_SHOP_ID, YOOKASSA_SECRET_KEY)
     payment = Payment.create(
         {
             "amount": {
-                "value": PREMIUM_PRICE_RUB,
+                "value": plan["rub"],
                 "currency": "RUB",
             },
             "capture": True,
@@ -719,11 +765,12 @@ def create_yookassa_payment_sync(user_id: int) -> tuple[str, str, str]:
                 "type": "redirect",
                 "return_url": YOOKASSA_RETURN_URL,
             },
-            "description": f"English Hub Premium {DEFAULT_PREMIUM_DAYS} days",
+            "description": f"English Hub Premium {plan['label']}",
             "metadata": {
                 "telegram_id": str(user_id),
                 "product": "premium",
-                "days": str(DEFAULT_PREMIUM_DAYS),
+                "plan": normalized_plan_key,
+                "days": str(plan["days"]),
             },
         },
         str(uuid4()),
@@ -2511,7 +2558,11 @@ def build_mastered_mistakes_text(user_id: int, page: int = 0) -> str:
 def build_premium_text(user_id: int) -> str:
     status = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
-    yookassa_text = f"{PREMIUM_PRICE_RUB} RUB через ЮKassa" if is_yookassa_configured() else "ЮKassa не настроена"
+    plans_text = "\n".join(
+        format_premium_plan_line(plan_key, plan)
+        for plan_key, plan in PREMIUM_PLANS.items()
+    )
+    yookassa_text = "карта через ЮKassa" if is_yookassa_configured() else "ЮKassa не настроена"
     support_line = f"Поддержка: {SUPPORT_CONTACT}" if SUPPORT_CONTACT else "Поддержка: кнопка «Поддержка» в главном меню"
 
     return (
@@ -2519,13 +2570,25 @@ def build_premium_text(user_id: int) -> str:
         f"Статус: {status}\n"
         f"AI сегодня: {ai_usage}\n\n"
         f"{get_premium_plan_text()}\n"
-        f"Срок подписки: {DEFAULT_PREMIUM_DAYS} дней\n"
-        f"Telegram Stars: {PREMIUM_STARS_PRICE} ⭐\n"
-        f"Карта: {yookassa_text}\n"
+        "Тарифы:\n"
+        f"{plans_text}\n\n"
+        f"Оплата: Telegram Stars или {yookassa_text}\n"
         f"{PREMIUM_PAYMENT_TEXT}\n\n"
         "Если Premium не включился после оплаты, нажмите «Проверить оплату картой» или напишите в поддержку.\n"
         f"{support_line}\n\n"
-        "Выберите удобный способ оплаты ниже."
+        "Выберите срок подписки ниже."
+    )
+
+
+def build_premium_checkout_text(plan_key: str) -> str:
+    plan = get_premium_plan(plan_key)
+    return (
+        "💎 Premium\n\n"
+        f"Срок: {plan['label']}\n"
+        f"Дней доступа: {plan['days']}\n"
+        f"Цена картой: {format_rub_price(plan['rub'])}\n"
+        f"Цена Stars: {plan['stars']} ⭐\n\n"
+        "Выберите способ оплаты."
     )
 
 
@@ -2690,13 +2753,29 @@ def delivery_timezone_kb(current_offset: str):
 
 
 def premium_kb():
-    rows = [
-        [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="premium_stars")],
-    ]
+    rows = []
+    for plan_key, plan in PREMIUM_PLANS.items():
+        rows.append([
+            InlineKeyboardButton(
+                text=f"{plan['label']} — {format_rub_price(plan['rub'])} / {plan['stars']} ⭐",
+                callback_data=f"premium_plan:{plan_key}",
+            )
+        ])
     if is_yookassa_configured():
-        rows.append([InlineKeyboardButton(text="💳 Оплатить картой", callback_data="premium_yookassa")])
         rows.append([InlineKeyboardButton(text="🔄 Проверить оплату картой", callback_data="premium_check")])
     rows.append([InlineKeyboardButton(text="🧾 Ручная проверка", callback_data="premium_request")])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def premium_plan_payment_kb(plan_key: str):
+    rows = [
+        [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data=f"premium_stars:{plan_key}")],
+    ]
+    if is_yookassa_configured():
+        rows.append([InlineKeyboardButton(text="💳 Оплатить картой", callback_data=f"premium_yookassa:{plan_key}")])
+        rows.append([InlineKeyboardButton(text="🔄 Проверить оплату картой", callback_data="premium_check")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад к тарифам", callback_data="premium")])
     rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -3094,19 +3173,21 @@ async def main():
             reply_markup=roadmap_kb(),
         )
 
-    async def send_stars_invoice(bot: Bot, user_id: int):
-        payload = f"premium_stars:{user_id}:{uuid4().hex[:16]}"
+    async def send_stars_invoice(bot: Bot, user_id: int, plan_key: str = "1m"):
+        plan = get_premium_plan(plan_key)
+        normalized_plan_key = plan_key if plan_key in PREMIUM_PLANS else "1m"
+        payload = f"premium_stars:{user_id}:{normalized_plan_key}:{uuid4().hex[:16]}"
         await bot.send_invoice(
             chat_id=user_id,
-            title=f"Premium на {DEFAULT_PREMIUM_DAYS} дней",
+            title=f"Premium на {plan['label']}",
             description="Безлимитные AI-объяснения, проверка практики и путь изучения.",
             payload=payload,
             provider_token="",
             currency="XTR",
-            prices=[LabeledPrice(label="Premium", amount=PREMIUM_STARS_PRICE)],
+            prices=[LabeledPrice(label=f"Premium {plan['label']}", amount=plan["stars"])],
         )
 
-    async def create_yookassa_payment(message: Message, user_id: int):
+    async def create_yookassa_payment(message: Message, user_id: int, plan_key: str = "1m"):
         if not is_yookassa_configured():
             await message.answer(
                 "ЮKassa пока не настроена. Добавьте YOOKASSA_SHOP_ID и YOOKASSA_SECRET_KEY в .env.",
@@ -3114,8 +3195,9 @@ async def main():
             )
             return
 
+        plan = get_premium_plan(plan_key)
         try:
-            payment_id, status, confirmation_url = await asyncio.to_thread(create_yookassa_payment_sync, user_id)
+            payment_id, status, confirmation_url = await asyncio.to_thread(create_yookassa_payment_sync, user_id, plan_key)
         except Exception as exc:
             logging.exception("Failed to create YooKassa payment: %s", exc)
             await notify_admin(bot, f"⚠️ YooKassa create failed\nUser: {user_id}\nError: {exc}")
@@ -3125,8 +3207,9 @@ async def main():
         save_pending_yookassa_payment(user_id, payment_id, confirmation_url)
         await message.answer(
             f"💳 Платёж создан.\n"
+            f"Срок: {plan['label']}\n"
             f"Статус: {status}\n"
-            f"Сумма: {PREMIUM_PRICE_RUB} RUB\n\n"
+            f"Сумма: {format_rub_price(plan['rub'])}\n\n"
             "После оплаты Premium должен включиться автоматически.\n"
             "Если сообщение не пришло в течение минуты, нажмите «Проверить оплату».",
             reply_markup=yookassa_payment_kb(confirmation_url),
@@ -4999,10 +5082,15 @@ Mistakes:
         if not payload.startswith("premium_stars:"):
             return
 
-        premium_until = grant_premium(message.from_user.id, DEFAULT_PREMIUM_DAYS)
+        parts = payload.split(":")
+        plan_key = parts[2] if len(parts) >= 4 and parts[2] in PREMIUM_PLANS else "1m"
+        plan = get_premium_plan(plan_key)
+        premium_until = grant_premium(message.from_user.id, plan["days"])
         save_telegram_payment_charge(message.from_user.id, payment.telegram_payment_charge_id)
         await message.answer(
-            f"✅ Оплата Stars прошла. Premium активирован до {premium_until}.",
+            f"✅ Оплата Stars прошла.\n"
+            f"Срок: {plan['label']}\n"
+            f"Premium активирован до {premium_until}.",
             reply_markup=main_menu(message.from_user.id),
         )
 
@@ -5029,6 +5117,17 @@ Mistakes:
         elif data == "premium":
             await show_premium(call.message, call.from_user.id, replace=True)
 
+        elif data.startswith("premium_plan:"):
+            plan_key = data.split(":", 1)[1]
+            if plan_key not in PREMIUM_PLANS:
+                await show_premium(call.message, call.from_user.id, replace=True)
+                return
+            await replace_or_answer(
+                call.message,
+                build_premium_checkout_text(plan_key),
+                reply_markup=premium_plan_payment_kb(plan_key),
+            )
+
         elif data == "premium_stats":
             if not is_premium(call.from_user.id):
                 await show_premium(call.message, call.from_user.id, replace=True)
@@ -5041,11 +5140,13 @@ Mistakes:
                 return
             await call.message.edit_text(build_premium_stats_text(call.from_user.id), reply_markup=premium_stats_kb())
 
-        elif data == "premium_stars":
-            await send_stars_invoice(bot, call.from_user.id)
+        elif data == "premium_stars" or data.startswith("premium_stars:"):
+            plan_key = data.split(":", 1)[1] if ":" in data else "1m"
+            await send_stars_invoice(bot, call.from_user.id, plan_key)
 
-        elif data == "premium_yookassa":
-            await create_yookassa_payment(call.message, call.from_user.id)
+        elif data == "premium_yookassa" or data.startswith("premium_yookassa:"):
+            plan_key = data.split(":", 1)[1] if ":" in data else "1m"
+            await create_yookassa_payment(call.message, call.from_user.id, plan_key)
 
         elif data == "premium_check":
             await check_yookassa_payment(call.message, call.from_user.id)
