@@ -458,7 +458,7 @@ def get_premium_plan_text() -> str:
         "• Подробный разбор ошибок\n"
         "• Чат-тренировка с AI-собеседником\n"
         "• Ежедневные неправильные глаголы\n"
-        "• Статистика и отчёт недели\n"
+        "• Статистика и недельный разбор\n"
     )
 
 
@@ -869,7 +869,7 @@ def build_weekly_report_text(user_id: int) -> str:
     try:
         user = db.query(User).filter(User.telegram_id == user_id).first()
         if not user:
-            return "📬 Отчёт недели\n\nПользователь не найден. Нажмите /start."
+            return "📬 Недельный разбор\n\nПользователь не найден. Нажмите /start."
 
         today = user_local_datetime(user).date()
         start_date = today - timedelta(days=6)
@@ -899,34 +899,40 @@ def build_weekly_report_text(user_id: int) -> str:
         correct_words = user.weekly_vocab_review_correct or 0
         vocab_accuracy = f"{round(correct_words / checked_words * 100)}%" if checked_words else "пока нет"
         next_goal = build_weekly_goal_text(len(active_mistakes), topics_done, topics_total, checked_words)
+        activity_total = (
+            (user.weekly_roadmap_topics_done or 0)
+            + (user.weekly_practice_sessions or 0)
+            + (user.weekly_mistake_training_sessions or 0)
+            + (user.weekly_chat_sessions or 0)
+            + (user.weekly_ai_explanations or 0)
+            + (user.weekly_ai_summaries or 0)
+            + (user.weekly_ai_quizzes or 0)
+        )
+        if activity_total == 0 and not weekly_words:
+            conclusion = "На этой неделе практики почти не было. Лучше начать с маленького шага, чтобы вернуть ритм."
+        elif active_mistakes:
+            conclusion = "Главный резерв роста сейчас — старые ошибки. Если закрывать их регулярно, путь изучения будет идти заметно легче."
+        elif topics_done < topics_total:
+            conclusion = "Ошибок немного, поэтому лучше двигаться по пути изучения и закрывать новые темы."
+        else:
+            conclusion = "Уровень почти закрыт. Хороший следующий шаг — финальный тест и поддержание навыка через практику."
 
         db.commit()
         return (
-            "📬 Premium-отчёт недели\n"
+            "📬 Недельный разбор\n"
             f"Период: {start_date.isoformat()} — {today.isoformat()}\n\n"
-            "Главное\n"
+            "Итог\n"
             f"• Серия дней: {visible_streak_count(user, user_local_today(user))}\n"
             f"• Темы пути: {topics_done}/{topics_total}\n"
-            f"• Цель на неделю: {next_goal}\n\n"
-            "Прогресс за неделю\n"
-            f"• Пройдено тем: {user.weekly_roadmap_topics_done or 0}\n"
-            f"• Тренировок по теме: {user.weekly_practice_sessions or 0}\n"
-            f"• Тренировок ошибок: {user.weekly_mistake_training_sessions or 0}\n"
-            f"• Чат-тренировок: {user.weekly_chat_sessions or 0}\n"
-            f"• AI-разборов: {user.weekly_ai_explanations or 0}\n"
-            f"• Шпаргалок: {user.weekly_ai_summaries or 0}\n"
-            f"• Мини-тестов: {user.weekly_ai_quizzes or 0}\n\n"
-            "Слова\n"
-            f"• Новых слов: {len(weekly_words)}\n"
-            f"• Irregular words: {len(weekly_irregular)}\n"
-            f"• Проверено слов: {checked_words}\n"
-            f"• Верно в проверке: {correct_words} ({vocab_accuracy})\n\n"
-            "Ошибки\n"
-            f"• Новых ошибок найдено: {len(weekly_new_mistakes)}\n"
-            f"• Ошибок повторено: {len(weekly_checked_mistakes)}\n"
-            f"• Активных ошибок сейчас: {len(active_mistakes)}\n"
-            f"• Исправлено ошибок всего: {len(mastered_mistakes)}\n"
-            f"• Слабые места: {weak_text}"
+            f"• Новых слов за неделю: {len(weekly_words)}\n"
+            f"• Проверка слов: {correct_words}/{checked_words} ({vocab_accuracy})\n"
+            f"• Ошибок повторено: {len(weekly_checked_mistakes)}\n\n"
+            "Вывод\n"
+            f"{conclusion}\n\n"
+            "Слабое место\n"
+            f"{weak_text}\n\n"
+            "Цель на неделю\n"
+            f"{next_goal}."
         )
     finally:
         db.close()
@@ -2286,8 +2292,8 @@ def build_advanced_menu_text() -> str:
         "💬 Чат-тренировка — диалог с AI\n"
         "🧠 Разбор ошибок — правило, пример и мини-задание\n"
         "🔥 Irregular words — 5 глаголов каждый день\n"
-        "📊 Статистика — ошибки, слова и пройденные темы\n"
-        "📬 Отчёт недели — прогресс и следующая цель"
+        "📊 Статистика — все счётчики обучения\n"
+        "📬 Недельный разбор — выводы, слабые места и следующая цель"
     )
 
 
@@ -2389,7 +2395,7 @@ def build_premium_text(user_id: int) -> str:
 
 
 def main_menu(user_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
         [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
         [
@@ -2400,7 +2406,10 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
             InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
-        [InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")],
+    ]
+    if not is_premium(user_id):
+        rows.append([InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")])
+    rows.extend([
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
@@ -2410,6 +2419,7 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide"),
         ],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def learning_menu(user_id: int):
@@ -2443,7 +2453,7 @@ def advanced_menu(user_id: int):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats"),
-            InlineKeyboardButton(text="📬 Отчёт недели", callback_data="weekly_report"),
+            InlineKeyboardButton(text="📬 Недельный разбор", callback_data="weekly_report"),
         ],
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
@@ -2455,17 +2465,21 @@ def advanced_menu(user_id: int):
 
 
 def settings_menu(user_id: int):
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [
             InlineKeyboardButton(text="🎯 Уровень", callback_data="change_level"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
         ],
         [InlineKeyboardButton(text="⏰ Рассылка", callback_data="delivery_settings")],
         [InlineKeyboardButton(text="✅ Исправленные ошибки", callback_data="mastered_mistakes")],
-        [InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")],
+    ]
+    if not is_premium(user_id):
+        rows.append([InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")])
+    rows.extend([
         [InlineKeyboardButton(text="🗑 Удалить аккаунт", callback_data="delete_account_confirm")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def delete_account_confirm_kb():
@@ -2563,7 +2577,7 @@ def premium_stats_kb():
 
 def weekly_report_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
+        [InlineKeyboardButton(text="📊 Все счётчики", callback_data="premium_stats")],
         [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
