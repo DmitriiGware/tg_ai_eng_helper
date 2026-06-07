@@ -63,7 +63,6 @@ VOCAB_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 DAILY_MISTAKE_HOUR = 18
 DAILY_IRREGULAR_VERBS_HOUR = 19
-WEEKLY_REPORT_HOUR = 12
 DEFAULT_TIMEZONE_OFFSET = "+03:00"
 DELIVERY_HOURS = list(range(8, 23))
 TIMEZONE_OPTIONS = [
@@ -458,7 +457,7 @@ def get_premium_plan_text() -> str:
         "• Подробный разбор ошибок\n"
         "• Чат-тренировка с AI-собеседником\n"
         "• Ежедневные неправильные глаголы\n"
-        "• Статистика и недельный разбор\n"
+        "• Статистика обучения\n"
     )
 
 
@@ -852,126 +851,6 @@ def parse_date_prefix(value: str | None):
 def is_date_in_range(value: str | None, start_date, end_date) -> bool:
     item_date = parse_date_prefix(value)
     return bool(item_date and start_date <= item_date <= end_date)
-
-
-def build_weekly_goal_text(active_errors: int, topics_done: int, topics_total: int, checked_words: int) -> str:
-    if active_errors >= DAILY_GOAL_ERRORS_TARGET:
-        return "закрыть 3 старые ошибки в тренировке"
-    if topics_done < topics_total:
-        return "пройти 1 тему в пути изучения"
-    if checked_words < VOCAB_REVIEW_WORDS_COUNT:
-        return "пройти проверку словаря"
-    return "поддержать серию и сделать 2 короткие тренировки"
-
-
-def build_weekly_report_text(user_id: int) -> str:
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.telegram_id == user_id).first()
-        if not user:
-            return "📬 Недельный разбор\n\nПользователь не найден. Нажмите /start."
-
-        today = user_local_datetime(user).date()
-        start_date = today - timedelta(days=6)
-
-        vocab_words = db.query(VocabWord).filter(VocabWord.telegram_id == user_id).all()
-        irregular_rows = db.query(IrregularVerbHistory).filter(IrregularVerbHistory.telegram_id == user_id).all()
-        mistakes = db.query(UserMistake).filter(UserMistake.telegram_id == user_id).all()
-
-        weekly_words = [item for item in vocab_words if is_date_in_range(item.sent_date, start_date, today)]
-        weekly_irregular = [item for item in irregular_rows if is_date_in_range(item.sent_date, start_date, today)]
-        weekly_new_mistakes = [item for item in mistakes if is_date_in_range(item.created_at, start_date, today)]
-        weekly_checked_mistakes = [item for item in mistakes if is_date_in_range(item.last_seen_at, start_date, today)]
-
-        active_mistakes = [item for item in mistakes if item.status == "active"]
-        mastered_mistakes = [item for item in mistakes if item.status == "mastered"]
-        weak_topics = {}
-        for mistake in active_mistakes:
-            topic = format_topic_title(mistake.topic or "без темы")
-            weak_topics[topic] = weak_topics.get(topic, 0) + 1
-        weak_list = sorted(weak_topics.items(), key=lambda item: item[1], reverse=True)[:3]
-        weak_text = ", ".join(f"{topic} ({count})" for topic, count in weak_list) if weak_list else "критичных слабых мест пока нет"
-
-        current_level = normalize_level(user.level)
-        topics_total = len(ROADMAP.get(current_level, []))
-        topics_done = min(max(user.current_topic_index or 0, 0), topics_total)
-        checked_words = user.weekly_vocab_review_checked or 0
-        correct_words = user.weekly_vocab_review_correct or 0
-        vocab_accuracy = f"{round(correct_words / checked_words * 100)}%" if checked_words else "пока нет"
-        next_goal = build_weekly_goal_text(len(active_mistakes), topics_done, topics_total, checked_words)
-        activity_total = (
-            (user.weekly_roadmap_topics_done or 0)
-            + (user.weekly_practice_sessions or 0)
-            + (user.weekly_mistake_training_sessions or 0)
-            + (user.weekly_chat_sessions or 0)
-            + (user.weekly_ai_explanations or 0)
-            + (user.weekly_ai_summaries or 0)
-            + (user.weekly_ai_quizzes or 0)
-        )
-        if activity_total == 0 and not weekly_words:
-            conclusion = "На этой неделе практики почти не было. Лучше начать с маленького шага, чтобы вернуть ритм."
-        elif active_mistakes:
-            conclusion = "Главный резерв роста сейчас — старые ошибки. Если закрывать их регулярно, путь изучения будет идти заметно легче."
-        elif topics_done < topics_total:
-            conclusion = "Ошибок немного, поэтому лучше двигаться по пути изучения и закрывать новые темы."
-        else:
-            conclusion = "Уровень почти закрыт. Хороший следующий шаг — финальный тест и поддержание навыка через практику."
-
-        db.commit()
-        return (
-            "📬 Недельный разбор\n"
-            f"Период: {start_date.isoformat()} — {today.isoformat()}\n\n"
-            "Итог\n"
-            f"• Серия дней: {visible_streak_count(user, user_local_today(user))}\n"
-            f"• Темы пути: {topics_done}/{topics_total}\n"
-            f"• Новых слов за неделю: {len(weekly_words)}\n"
-            f"• Проверка слов: {correct_words}/{checked_words} ({vocab_accuracy})\n"
-            f"• Ошибок повторено: {len(weekly_checked_mistakes)}\n\n"
-            "Вывод\n"
-            f"{conclusion}\n\n"
-            "Слабое место\n"
-            f"{weak_text}\n\n"
-            "Цель на неделю\n"
-            f"{next_goal}."
-        )
-    finally:
-        db.close()
-
-
-def is_weekly_report_due(user: User) -> bool:
-    if not is_premium_user(user):
-        return False
-
-    local_now = user_local_datetime(user)
-    if local_now.hour < WEEKLY_REPORT_HOUR:
-        return False
-
-    last_sent = parse_date_prefix(user.last_weekly_report_sent_date)
-    if not last_sent:
-        return True
-    return (local_now.date() - last_sent).days >= 7
-
-
-def mark_weekly_report_sent(user_id: int) -> None:
-    db = SessionLocal()
-    try:
-        user = db.query(User).filter(User.telegram_id == user_id).first()
-        if not user:
-            return
-        user.last_weekly_report_sent_date = user_local_today(user)
-        user.weekly_stats_key = user_week_key(user)
-        user.weekly_roadmap_topics_done = 0
-        user.weekly_practice_sessions = 0
-        user.weekly_mistake_training_sessions = 0
-        user.weekly_chat_sessions = 0
-        user.weekly_ai_explanations = 0
-        user.weekly_ai_summaries = 0
-        user.weekly_ai_quizzes = 0
-        user.weekly_vocab_review_checked = 0
-        user.weekly_vocab_review_correct = 0
-        db.commit()
-    finally:
-        db.close()
 
 
 def is_irregular_verbs_enabled(user_id: int) -> bool:
@@ -2292,8 +2171,7 @@ def build_advanced_menu_text() -> str:
         "💬 Чат-тренировка — диалог с AI\n"
         "🧠 Разбор ошибок — правило, пример и мини-задание\n"
         "🔥 Irregular words — 5 глаголов каждый день\n"
-        "📊 Статистика — все счётчики обучения\n"
-        "📬 Недельный разбор — выводы, слабые места и следующая цель"
+        "📊 Статистика — ошибки, слова, темы и активность"
     )
 
 
@@ -2451,10 +2329,7 @@ def advanced_menu(user_id: int):
     irregular_label = "🔥 Irregular words" if is_premium(user_id) else "🔥 Irregular words 🔒"
 
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats"),
-            InlineKeyboardButton(text="📬 Недельный разбор", callback_data="weekly_report"),
-        ],
+        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
         [
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
             InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
@@ -2570,14 +2445,6 @@ def premium_kb():
 
 def premium_stats_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
-        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
-    ])
-
-
-def weekly_report_kb():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Все счётчики", callback_data="premium_stats")],
         [InlineKeyboardButton(text="💎 Premium функции", callback_data="menu_advanced")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -3659,43 +3526,6 @@ async def main():
                         logging.exception("Failed to send daily irregular verbs to %s: %s", user.telegram_id, exc)
             except Exception as exc:
                 logging.exception("Irregular verbs daily loop failed: %s", exc)
-
-            await asyncio.sleep(3600)
-
-    async def send_weekly_report(bot: Bot, user_id: int, force: bool = False) -> bool:
-        db = SessionLocal()
-        try:
-            user = db.query(User).filter(User.telegram_id == user_id).first()
-            if not user:
-                return False
-            if not force and not is_weekly_report_due(user):
-                return False
-        finally:
-            db.close()
-
-        await bot.send_message(
-            user_id,
-            build_weekly_report_text(user_id),
-            reply_markup=weekly_report_kb(),
-        )
-        if not force:
-            mark_weekly_report_sent(user_id)
-        return True
-
-    async def weekly_report_loop(bot: Bot):
-        while True:
-            try:
-                db = SessionLocal()
-                users = db.query(User).all()
-                db.close()
-
-                for user in users:
-                    try:
-                        await send_weekly_report(bot, user.telegram_id)
-                    except Exception as exc:
-                        logging.exception("Failed to send weekly report to %s: %s", user.telegram_id, exc)
-            except Exception as exc:
-                logging.exception("Weekly report loop failed: %s", exc)
 
             await asyncio.sleep(3600)
 
@@ -4854,7 +4684,7 @@ Mistakes:
             if not is_premium(call.from_user.id):
                 await show_premium(call.message, call.from_user.id, replace=True)
                 return
-            await call.message.edit_text(build_weekly_report_text(call.from_user.id), reply_markup=weekly_report_kb())
+            await call.message.edit_text(build_premium_stats_text(call.from_user.id), reply_markup=premium_stats_kb())
 
         elif data == "premium_stars":
             await send_stars_invoice(bot, call.from_user.id)
@@ -5412,7 +5242,6 @@ Mistakes:
     asyncio.create_task(vocab_daily_loop(bot))
     asyncio.create_task(mistake_daily_loop(bot))
     asyncio.create_task(irregular_verbs_daily_loop(bot))
-    asyncio.create_task(weekly_report_loop(bot))
     await start_web_server(bot)
     await notify_bot_started(bot)
     await dp.start_polling(bot)
