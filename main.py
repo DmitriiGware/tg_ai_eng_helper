@@ -1,4 +1,6 @@
 import asyncio
+import csv
+import io
 import json
 import logging
 import os
@@ -13,7 +15,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery
 from aiohttp import web
 from dotenv import load_dotenv
 
@@ -48,6 +50,7 @@ load_dotenv(dotenv_path=ENV_PATH, override=True)
 
 BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
 ADMIN_TELEGRAM_ID = (os.getenv("TELEGRAM_ADMIN_ID") or "").strip()
+SUPPORT_CONTACT = (os.getenv("SUPPORT_CONTACT") or os.getenv("SUPPORT_USERNAME") or "").strip()
 PREMIUM_PAYMENT_TEXT = (os.getenv("PREMIUM_PAYMENT_TEXT") or "Способ оплаты уточняется у администратора.").strip()
 YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
@@ -490,6 +493,15 @@ def is_admin(user_id: int | None) -> bool:
     return str(user_id) == ADMIN_TELEGRAM_ID
 
 
+async def notify_admin(bot: Bot, text: str) -> None:
+    if not ADMIN_TELEGRAM_ID:
+        return
+    try:
+        await bot.send_message(int(ADMIN_TELEGRAM_ID), text[:3900])
+    except Exception as exc:
+        logging.exception("Failed to notify admin: %s", exc)
+
+
 def is_yookassa_configured() -> bool:
     return bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
 
@@ -545,7 +557,7 @@ def get_free_plan_text() -> str:
         f"• Vocabulary: {VOCAB_WORDS_PER_DAY} слов в день\n"
         "• Глоссарий, профиль, уровень и помощь без лимита\n"
         "• Irregular verbs недоступны\n"
-        "• Chat и Voice недоступны"
+        "• Chat недоступен"
     )
 
 
@@ -780,7 +792,7 @@ def premium_limit_text() -> str:
         "• AI-разборы и тренировки\n"
         "• чат-тренировка\n"
         "• подробный разбор ошибок\n"
-        "• больше слов в день"
+        "• статистика обучения"
     )
 
 
@@ -952,6 +964,122 @@ def build_premium_stats_text(user_id: int) -> str:
         f"• Тренировки ошибок: {stats['mistake_training_sessions_completed']}\n"
         f"• Чат-тренировки: {stats['chat_sessions_completed']}"
     )
+
+
+def build_status_text(user_id: int) -> str:
+    user = get_user(user_id)
+    if not user:
+        return "📌 Статус\n\nПрофиль не найден. Нажмите /start."
+
+    active_errors = get_due_mistakes(user_id, limit=1000)
+    delivery = get_delivery_settings(user_id)
+    return (
+        "📌 Ваш статус\n\n"
+        f"ID: {user_id}\n"
+        f"Тариф: {get_premium_status_text(user_id)}\n"
+        f"AI: {get_ai_usage_text(user_id)}\n"
+        f"Уровень: {level_label(user.level)}\n"
+        f"Путь изучения: {get_roadmap_status_text(user_id)}\n"
+        f"Активных ошибок: {len(active_errors)}\n"
+        f"Слова сегодня: {'уже были' if user.last_vocab_sent_date == user_local_today(user) else 'ещё не были'}\n"
+        f"Время словаря: {delivery['vocab_hour']:02d}:00\n"
+        f"Время ошибки дня: {delivery['mistake_hour']:02d}:00"
+    )
+
+
+def build_support_text(user_id: int) -> str:
+    contact = SUPPORT_CONTACT or "администратору бота"
+    return (
+        "🛟 Поддержка\n\n"
+        "Если оплата не включила Premium, пропал прогресс или бот отвечает странно, напишите в поддержку.\n\n"
+        f"Куда писать: {contact}\n"
+        f"Ваш ID: {user_id}\n\n"
+        "Лучше сразу приложить ID и коротко описать, что произошло."
+    )
+
+
+def build_admin_user_text(user_id: int) -> str:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return f"Пользователь {user_id} не найден."
+
+        mistakes_total = db.query(UserMistake).filter(UserMistake.telegram_id == user_id).count()
+        mistakes_active = (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "active")
+            .count()
+        )
+        mistakes_mastered = (
+            db.query(UserMistake)
+            .filter(UserMistake.telegram_id == user_id, UserMistake.status == "mastered")
+            .count()
+        )
+        vocab_total = db.query(VocabWord).filter(VocabWord.telegram_id == user_id).count()
+        irregular_total = db.query(IrregularVerbHistory).filter(IrregularVerbHistory.telegram_id == user_id).count()
+
+        return (
+            "👤 Пользователь\n\n"
+            f"ID: {user.telegram_id}\n"
+            f"Имя: {user.name or '—'}\n"
+            f"Дата рождения: {user.birthday or '—'}\n"
+            f"Частота: {user.frequency or '—'}\n"
+            f"Тариф: {get_premium_status_text(user_id)}\n"
+            f"Premium до: {user.premium_until or '—'}\n"
+            f"Уровень: {level_label(user.level)}\n"
+            f"Путь: тема {user.current_topic_index or 0}, review {user.roadmap_review_index or 0}\n"
+            f"AI сегодня: {user.ai_requests_count or 0} ({user.ai_requests_date or '—'})\n"
+            f"Слов: {vocab_total}\n"
+            f"Irregular: {irregular_total}\n"
+            f"Ошибок: {mistakes_total}, активных: {mistakes_active}, исправленных: {mistakes_mastered}\n"
+            f"Последний YooKassa: {user.last_yookassa_payment_id or '—'}\n"
+            f"Последний Stars charge: {user.last_telegram_payment_charge_id or '—'}"
+        )
+    finally:
+        db.close()
+
+
+def make_csv_file(rows: list[list], filename: str) -> BufferedInputFile:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerows(rows)
+    return BufferedInputFile(output.getvalue().encode("utf-8-sig"), filename=filename)
+
+
+def export_users_csv_file() -> BufferedInputFile:
+    db = SessionLocal()
+    try:
+        columns = [column.name for column in User.__table__.columns]
+        rows = [columns]
+        for user in db.query(User).order_by(User.id.asc()).all():
+            rows.append([getattr(user, column, "") for column in columns])
+        return make_csv_file(rows, f"users_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    finally:
+        db.close()
+
+
+def export_stats_csv_file() -> BufferedInputFile:
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        premium_users = [user for user in users if is_premium_user(user)]
+        rows = [
+            ["metric", "value"],
+            ["users_total", len(users)],
+            ["premium_active", len(premium_users)],
+            ["mistakes_total", db.query(UserMistake).count()],
+            ["mistakes_active", db.query(UserMistake).filter(UserMistake.status == "active").count()],
+            ["mistakes_mastered", db.query(UserMistake).filter(UserMistake.status == "mastered").count()],
+            ["vocab_words_total", db.query(VocabWord).count()],
+            ["irregular_history_total", db.query(IrregularVerbHistory).count()],
+            ["roadmap_topics_completed_total", sum(user.roadmap_topics_completed_total or 0 for user in users)],
+            ["ai_explanations_total", sum(user.ai_explanations_completed or 0 for user in users)],
+            ["chat_sessions_total", sum(user.chat_sessions_completed or 0 for user in users)],
+        ]
+        return make_csv_file(rows, f"stats_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+    finally:
+        db.close()
 
 
 def parse_date_prefix(value: str | None):
@@ -2384,15 +2512,19 @@ def build_premium_text(user_id: int) -> str:
     status = get_premium_status_text(user_id)
     ai_usage = get_ai_usage_text(user_id)
     yookassa_text = f"{PREMIUM_PRICE_RUB} RUB через ЮKassa" if is_yookassa_configured() else "ЮKassa не настроена"
+    support_line = f"Поддержка: {SUPPORT_CONTACT}" if SUPPORT_CONTACT else "Поддержка: кнопка «Поддержка» в главном меню"
 
     return (
         "💎 Premium\n"
         f"Статус: {status}\n"
         f"AI сегодня: {ai_usage}\n\n"
         f"{get_premium_plan_text()}\n"
+        f"Срок подписки: {DEFAULT_PREMIUM_DAYS} дней\n"
         f"Telegram Stars: {PREMIUM_STARS_PRICE} ⭐\n"
         f"Карта: {yookassa_text}\n"
         f"{PREMIUM_PAYMENT_TEXT}\n\n"
+        "Если Premium не включился после оплаты, нажмите «Проверить оплату картой» или напишите в поддержку.\n"
+        f"{support_line}\n\n"
         "Выберите удобный способ оплаты ниже."
     )
 
@@ -2417,6 +2549,7 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
         ],
+        [InlineKeyboardButton(text="🛟 Поддержка", callback_data="support")],
         [
             InlineKeyboardButton(text="📖 Глоссарий", callback_data="glossary"),
             InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide"),
@@ -2459,7 +2592,6 @@ def advanced_menu(user_id: int):
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
             InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
         ],
-        [InlineKeyboardButton(text=lock("🎤 Голос скоро", "voice"), callback_data="mode_voice")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -2566,6 +2698,14 @@ def premium_kb():
     rows.append([InlineKeyboardButton(text="🧾 Ручная проверка", callback_data="premium_request")])
     rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def placement_done_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗺 Начать путь изучения", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text="✍️ Тренировка ошибок", callback_data="mode_practice")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
 
 
 def premium_stats_kb():
@@ -2890,7 +3030,7 @@ async def main():
             "2. Если бот просит тему, напишите её обычным текстом.\n"
             "3. Если бот дал задание, выберите вариант кнопкой или отправьте ответ текстом.\n\n"
             f"{build_learning_guide_text(guide_user_id)}\n\n"
-            "Команды: /start, /help, /cancel, /premium, /delete_account"
+            "Команды: /start, /help, /status, /id, /support, /cancel, /premium, /delete_account"
         )
         if replace:
             await replace_or_answer(message, text, reply_markup=main_menu(guide_user_id))
@@ -2977,6 +3117,7 @@ async def main():
             payment_id, status, confirmation_url = await asyncio.to_thread(create_yookassa_payment_sync, user_id)
         except Exception as exc:
             logging.exception("Failed to create YooKassa payment: %s", exc)
+            await notify_admin(bot, f"⚠️ YooKassa create failed\nUser: {user_id}\nError: {exc}")
             await message.answer(f"Не получилось создать платеж ЮKassa: {exc}", reply_markup=premium_kb())
             return
 
@@ -3000,6 +3141,7 @@ async def main():
             activated, _, premium_until, status = await asyncio.to_thread(activate_yookassa_payment_sync, payment_id)
         except Exception as exc:
             logging.exception("Failed to check YooKassa payment: %s", exc)
+            await notify_admin(bot, f"⚠️ YooKassa check failed\nUser: {user_id}\nPayment: {payment_id}\nError: {exc}")
             await message.answer(f"Не получилось проверить платеж ЮKassa: {exc}", reply_markup=premium_kb())
             return
 
@@ -4565,7 +4707,7 @@ Mistakes:
             f"Стартовый уровень: {level_label(level)}\n\n"
             f"Результаты:\n{format_placement_scores(scores, totals)}\n\n"
             "Дальше лучше начать с «Пути изучения». Ошибки из диагностики уже добавлены в тренировку.",
-            reply_markup=main_menu(call.from_user.id),
+            reply_markup=placement_done_kb(),
         )
 
     @dp.message(Registration.name)
@@ -4712,6 +4854,18 @@ Mistakes:
     async def help_cmd(message: Message):
         await show_help(message, message.from_user.id)
 
+    @dp.message(Command("id"))
+    async def id_cmd(message: Message):
+        await message.answer(f"Ваш Telegram ID: {message.from_user.id}")
+
+    @dp.message(Command("status"))
+    async def status_cmd(message: Message):
+        await message.answer(build_status_text(message.from_user.id), reply_markup=main_menu(message.from_user.id))
+
+    @dp.message(Command("support"))
+    async def support_cmd(message: Message):
+        await message.answer(build_support_text(message.from_user.id), reply_markup=main_menu(message.from_user.id))
+
     @dp.message(Command("cancel"))
     async def cancel_cmd(message: Message, state: FSMContext):
         await cancel_action(message, state)
@@ -4789,6 +4943,41 @@ Mistakes:
         except Exception as exc:
             logging.exception("Failed to notify revoked premium user %s: %s", target_user_id, exc)
 
+    @dp.message(Command("user"))
+    async def admin_user_cmd(message: Message):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer("Формат: /user USER_ID\nПример: /user 123456789")
+            return
+
+        try:
+            target_user_id = int(parts[1])
+        except ValueError:
+            await message.answer("USER_ID должен быть числом.")
+            return
+
+        await message.answer(build_admin_user_text(target_user_id))
+
+    @dp.message(Command("export_users"))
+    async def export_users_cmd(message: Message):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+
+        await message.answer_document(export_users_csv_file(), caption="CSV пользователей")
+
+    @dp.message(Command("export_stats"))
+    async def export_stats_cmd(message: Message):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+
+        await message.answer_document(export_stats_csv_file(), caption="CSV общей статистики")
+
     @dp.pre_checkout_query()
     async def pre_checkout_query(query: PreCheckoutQuery):
         payload = query.invoice_payload or ""
@@ -4825,6 +5014,9 @@ Mistakes:
 
         if data == "help":
             await show_help(call.message, call.from_user.id, replace=True)
+
+        elif data == "support":
+            await replace_or_answer(call.message, build_support_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
 
         elif data == "learning_guide":
             await replace_or_answer(
@@ -5130,16 +5322,12 @@ Mistakes:
 
         elif data.startswith("mode_"):
             mode = data.replace("mode_", "")
-            if MODES[mode]["premium"] and not is_premium(call.from_user.id):
-                await show_premium(call.message, call.from_user.id, replace=True)
+            if mode not in MODES:
+                await replace_or_answer(call.message, build_main_menu_text(call.from_user.id), reply_markup=main_menu(call.from_user.id))
                 return
 
-            if mode == "voice":
-                await replace_or_answer(
-                    call.message,
-                    "🎤 Голосовой режим пока готовится.\n\nСейчас можно пользоваться текстовыми режимами: объяснение, практика, тесты и путь изучения.",
-                    reply_markup=main_menu(call.from_user.id),
-                )
+            if MODES[mode]["premium"] and not is_premium(call.from_user.id):
+                await show_premium(call.message, call.from_user.id, replace=True)
                 return
 
             if mode == "roadmap":

@@ -23,8 +23,4 @@ MODES = {
         "title": "Путь изучения",
         "premium": False,
     },
-    "voice": {
-        "title": "Голос",
-        "premium": True,
-    },
 }
