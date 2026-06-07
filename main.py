@@ -2400,7 +2400,7 @@ def main_menu(user_id: int):
             InlineKeyboardButton(text="📝 Шпаргалка", callback_data="mode_summary"),
             InlineKeyboardButton(text="✨ Слова на день", callback_data="vocab_settings"),
         ],
-        [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
+        [InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")],
         [
             InlineKeyboardButton(text="⚙️ Профиль", callback_data="menu_settings"),
             InlineKeyboardButton(text="❔ Помощь", callback_data="help"),
@@ -2462,7 +2462,7 @@ def settings_menu(user_id: int):
         ],
         [InlineKeyboardButton(text="⏰ Рассылка", callback_data="delivery_settings")],
         [InlineKeyboardButton(text="✅ Исправленные ошибки", callback_data="mastered_mistakes")],
-        [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
+        [InlineKeyboardButton(text="💳 Купить Premium подписку", callback_data="premium")],
         [InlineKeyboardButton(text="🗑 Удалить аккаунт", callback_data="delete_account_confirm")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
@@ -2544,8 +2544,6 @@ def delivery_timezone_kb(current_offset: str):
 
 def premium_kb():
     rows = [
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="premium_stats")],
-        [InlineKeyboardButton(text="📬 Отчёт недели", callback_data="weekly_report")],
         [InlineKeyboardButton(text="⭐ Оплатить Stars", callback_data="premium_stars")],
     ]
     if is_yookassa_configured():
