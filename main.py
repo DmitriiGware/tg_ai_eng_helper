@@ -53,7 +53,7 @@ YOOKASSA_SHOP_ID = (os.getenv("YOOKASSA_SHOP_ID") or "").strip()
 YOOKASSA_SECRET_KEY = (os.getenv("YOOKASSA_SECRET_KEY") or "").strip()
 YOOKASSA_RETURN_URL = (os.getenv("YOOKASSA_RETURN_URL") or "https://t.me/").strip()
 YOOKASSA_WEBHOOK_PATH = (os.getenv("YOOKASSA_WEBHOOK_PATH") or "/yookassa/webhook").strip()
-PREMIUM_PRICE_RUB = (os.getenv("PREMIUM_PRICE_RUB") or "299.00").strip()
+PREMIUM_PRICE_RUB = (os.getenv("PREMIUM_PRICE_RUB") or "150.00").strip()
 PREMIUM_STARS_PRICE = int((os.getenv("PREMIUM_STARS_PRICE") or "150").strip())
 WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
 WEB_SERVER_PORT = int((os.getenv("PORT") or os.getenv("WEB_SERVER_PORT") or "8080").strip())
@@ -2253,7 +2253,7 @@ def build_learning_guide_text(user_id: int) -> str:
         "4. Шпаргалка\n"
         "Короткая памятка по теме без длинного урока. Удобно открыть, когда правило уже знакомо, но нужно быстро вспомнить форму, маркеры, примеры и частые ошибки.\n\n"
         "5. Слова на день\n"
-        f"Ежедневный словарь: бот присылает {VOCAB_WORDS_PER_DAY} новых слов с переводом и примером. Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней предлагает проверку на {VOCAB_REVIEW_WORDS_COUNT} слов, где перевод нужно ввести вручную.\n\n"
+        f"Ежедневный словарь: бот присылает {VOCAB_WORDS_PER_DAY} новых слов с переводом и примером. Проверку последних слов можно запустить в любой момент, а раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот сам предлагает большую проверку на {VOCAB_REVIEW_WORDS_COUNT} слов.\n\n"
         "6. Irregular verbs\n"
         "Premium-рассылка: каждый день 5 неправильных глаголов с формами и примером."
     )
@@ -3165,7 +3165,12 @@ async def main():
                     return True
         return False
 
-    def get_vocab_review_words(user_id: int, limit: int = VOCAB_REVIEW_WORDS_COUNT) -> list[dict]:
+    def get_vocab_review_words(
+        user_id: int,
+        limit: int = VOCAB_REVIEW_WORDS_COUNT,
+        require_full: bool = True,
+        newest_first: bool = False,
+    ) -> list[dict]:
         db = SessionLocal()
         try:
             rows = (
@@ -3189,9 +3194,13 @@ async def main():
                     "example": row.example,
                 })
 
-            if len(unique) < limit:
+            if not unique or (require_full and len(unique) < limit):
                 return []
-            return random.sample(unique, limit)
+
+            count = min(limit, len(unique))
+            if newest_first:
+                return unique[:count]
+            return random.sample(unique, count)
         finally:
             db.close()
 
@@ -3272,8 +3281,8 @@ async def main():
         text = (
             "✨ Настройка словаря\n"
             f"Каждый день бот присылает {VOCAB_WORDS_PER_DAY} новых слов. Это единый темп для Free и Premium.\n"
-            f"Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предложит проверку: {VOCAB_REVIEW_WORDS_COUNT} слов, перевод вводится вручную.\n"
-            "Можно получить сегодняшнюю подборку сразу или запустить проверку."
+            f"Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предложит большую проверку: {VOCAB_REVIEW_WORDS_COUNT} слов, перевод вводится вручную.\n"
+            "Проверку последних слов можно запустить в любой момент."
         )
         if replace:
             await replace_or_answer(message, text, reply_markup=vocab_settings_kb())
@@ -3281,10 +3290,10 @@ async def main():
             await message.answer(text, reply_markup=vocab_settings_kb())
 
     async def start_vocab_review(message: Message, state: FSMContext, user_id: int):
-        words = get_vocab_review_words(user_id)
+        words = get_vocab_review_words(user_id, require_full=False, newest_first=True)
         if not words:
             await message.answer(
-                f"Пока не хватает слов для проверки. Нужно минимум {VOCAB_REVIEW_WORDS_COUNT} слов из вашего словаря.",
+                "Пока нет слов для проверки. Сначала получите слова на день.",
                 reply_markup=main_menu(user_id),
             )
             return
@@ -3392,6 +3401,14 @@ async def main():
 
             today = user_local_today(user)
             vocab_hour = delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR)
+            if force and user.last_vocab_sent_date == today:
+                await bot.send_message(
+                    user_id,
+                    "✨ Сегодня слова уже были отправлены.\n\n"
+                    f"Новая подборка придёт завтра после {vocab_hour:02d}:00 по вашему местному времени.",
+                    reply_markup=vocab_settings_kb(),
+                )
+                return False
             if not force and not is_delivery_due(user, user.last_vocab_sent_date, vocab_hour):
                 return False
 
@@ -5101,14 +5118,10 @@ Mistakes:
                     return
 
                 user.words_per_day = VOCAB_WORDS_PER_DAY
-                user.last_vocab_sent_date = ""
                 db.commit()
             finally:
                 db.close()
 
-            await call.message.answer(
-                f"✨ Словарь настроен: {VOCAB_WORDS_PER_DAY} слов в день."
-            )
             await send_vocab_words(bot, call.from_user.id, force=True)
 
         elif data.startswith("mode_"):
