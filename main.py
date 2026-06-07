@@ -108,8 +108,107 @@ PLACEMENT_TEST_PLAN = [
     ("A1", 2),
     ("A2", 2),
     ("B1", 2),
-    ("B2", 1),
-    ("C1", 1),
+    ("B2", 2),
+    ("C1", 2),
+    ("C2", 2),
+]
+PLACEMENT_QUESTIONS = [
+    {
+        "test_level": "A1",
+        "topic": "to be",
+        "question": "You want to say that you are happy now. Which English sentence is correct?",
+        "question_ru": "Вы хотите сказать, что вы сейчас счастливы. Какое предложение на английском правильное?",
+        "options": ["I am happy.", "I is happy.", "I be happy."],
+        "answer": "I am happy.",
+    },
+    {
+        "test_level": "A1",
+        "topic": "articles",
+        "question": "Complete the sentence: I have ___ apple.",
+        "question_ru": "Дополните предложение: I have ___ apple. Нужно выбрать правильный артикль перед словом apple.",
+        "options": ["an", "a", "the"],
+        "answer": "an",
+    },
+    {
+        "test_level": "A2",
+        "topic": "past simple regular",
+        "question": "Complete the past sentence: I ___ TV yesterday.",
+        "question_ru": "Дополните предложение в прошедшем времени: I ___ TV yesterday.",
+        "options": ["watched", "watch", "watching"],
+        "answer": "watched",
+    },
+    {
+        "test_level": "A2",
+        "topic": "comparatives",
+        "question": "You compare two books by price. Which sentence is correct?",
+        "question_ru": "Вы сравниваете две книги по цене. Какое предложение построено правильно?",
+        "options": ["This book is cheaper.", "This book is more cheap.", "This book cheaper."],
+        "answer": "This book is cheaper.",
+    },
+    {
+        "test_level": "B1",
+        "topic": "present perfect",
+        "question": "You talk about life experience, not a specific time. Which sentence is correct?",
+        "question_ru": "Вы говорите о жизненном опыте, без точного времени. Какое предложение правильное?",
+        "options": ["I have seen this film.", "I saw this film already.", "I have saw this film."],
+        "answer": "I have seen this film.",
+    },
+    {
+        "test_level": "B1",
+        "topic": "first conditional",
+        "question": "You talk about a real possible future situation. Which sentence is correct?",
+        "question_ru": "Вы говорите о реальной возможной ситуации в будущем. Какое предложение правильное?",
+        "options": ["If it rains, I will stay home.", "If it will rain, I stay home.", "If it rains, I stay home yesterday."],
+        "answer": "If it rains, I will stay home.",
+    },
+    {
+        "test_level": "B2",
+        "topic": "mixed conditionals",
+        "question": "Past studying would change your confidence now. Which mixed conditional is correct?",
+        "question_ru": "Учёба в прошлом изменила бы вашу уверенность сейчас. Какой смешанный conditional правильный?",
+        "options": ["If I had studied, I would be confident now.", "If I studied, I would have been confident now.", "If I had studied, I will be confident now."],
+        "answer": "If I had studied, I would be confident now.",
+    },
+    {
+        "test_level": "B2",
+        "topic": "formal vocabulary",
+        "question": "In 'We need to postpone the meeting', what does 'postpone' mean?",
+        "question_ru": "Во фразе 'We need to postpone the meeting' что означает слово 'postpone'?",
+        "options": ["delay", "cancel", "repeat"],
+        "answer": "delay",
+    },
+    {
+        "test_level": "C1",
+        "topic": "hedging",
+        "question": "You want to write cautiously in an academic style. Which phrase is best?",
+        "question_ru": "Вы хотите написать осторожно в академическом стиле. Какая фраза подходит лучше всего?",
+        "options": ["This appears to suggest a pattern.", "This proves always a pattern.", "This surely says a pattern."],
+        "answer": "This appears to suggest a pattern.",
+    },
+    {
+        "test_level": "C1",
+        "topic": "advanced inversion",
+        "question": "You start with 'Under no circumstances' for strong prohibition. Which word order is correct?",
+        "question_ru": "Вы начинаете с 'Under no circumstances' для строгого запрета. Какой порядок слов правильный?",
+        "options": ["Under no circumstances should you open it.", "Under no circumstances you should open it.", "Under no circumstances should open you it."],
+        "answer": "Under no circumstances should you open it.",
+    },
+    {
+        "test_level": "C2",
+        "topic": "idiomatic precision",
+        "question": "You want to say the proposal is not good enough. Which idiomatic sentence is correct?",
+        "question_ru": "Вы хотите сказать, что предложение недостаточно хорошее. Какое идиоматическое предложение правильное?",
+        "options": ["The proposal leaves much to be desired.", "The proposal leaves many to desire.", "The proposal leaves desired much."],
+        "answer": "The proposal leaves much to be desired.",
+    },
+    {
+        "test_level": "C2",
+        "topic": "fixed expressions",
+        "question": "Which fixed expression means 'in practical terms'?",
+        "question_ru": "Какое устойчивое выражение означает 'на практике' или 'по сути'?",
+        "options": ["for all intents and purposes", "for all intensive purposes", "for every intent purposes"],
+        "answer": "for all intents and purposes",
+    },
 ]
 
 LEVELS = [
@@ -1851,10 +1950,18 @@ def build_practice_summary(topic: str, results: list[dict]) -> str:
 
 def build_placement_test() -> list[dict]:
     questions = []
-    for level, count in PLACEMENT_TEST_PLAN:
-        for question in get_level_test(level, count):
-            question["test_level"] = level
-            questions.append(question)
+    for item in PLACEMENT_QUESTIONS:
+        options = item["options"].copy()
+        random.shuffle(options)
+        questions.append({
+            "test_level": item["test_level"],
+            "topic": item["topic"],
+            "question": item["question"],
+            "question_ru": item["question_ru"],
+            "options": options,
+            "correct_index": options.index(item["answer"]),
+            "answer": item["answer"],
+        })
     return questions
 
 
@@ -1878,7 +1985,9 @@ def determine_placement_level(questions: list[dict], answers: list[int]) -> tupl
         return "B1", scores, totals
     if scores.get("C1", 0) < 1:
         return "B2", scores, totals
-    return "C1", scores, totals
+    if scores.get("C2", 0) < 1:
+        return "C1", scores, totals
+    return "C2", scores, totals
 
 
 def format_placement_scores(scores: dict[str, int], totals: dict[str, int]) -> str:
@@ -2950,12 +3059,21 @@ async def main():
         test_kind = data.get("test_kind")
         if test_kind == "placement":
             title = "Диагностика"
+            level_note = f"\nУровень вопроса: {level_label(question.get('test_level', DEFAULT_LEVEL))}\n"
+            question_text = (
+                f"English: {question['question']}\n\n"
+                f"Русский: {question.get('question_ru') or 'Выберите правильный вариант ответа.'}"
+            )
         elif test_kind == "roadmap_final":
             title = "Финальный тест"
+            level_note = ""
+            question_text = question["question"]
         else:
             title = "Вопрос"
+            level_note = ""
+            question_text = question["question"]
         await message.answer(
-            f"🧪 {title} {index + 1}/{len(questions)}\n\n{question['question']}",
+            f"🧪 {title} {index + 1}/{len(questions)}{level_note}\n{question_text}",
             reply_markup=level_question_kb(question),
         )
 
@@ -4560,8 +4678,9 @@ Mistakes:
         )
         await call.message.edit_text(
             f"✨ Добро пожаловать, {name}!\n\n"
-            "Сейчас пройдём короткую диагностику: 8 вопросов с вариантами ответа.\n"
-            "Это поможет поставить стартовый уровень и собрать первые темы для тренировки."
+            "Сейчас пройдём короткую диагностику: 12 вопросов с вариантами ответа.\n"
+            "Будет по 2 вопроса от каждого уровня A1-C2, поэтому незнакомые задания — это нормально.\n"
+            "Так бот аккуратно найдёт ваш стартовый уровень и первые темы для тренировки."
         )
         await send_level_question(call.message, state)
 
