@@ -779,6 +779,26 @@ def get_premium_stats_snapshot(user_id: int) -> dict:
         db.close()
 
 
+def delete_user_account(user_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return False
+
+        db.query(UserMistake).filter(UserMistake.telegram_id == user_id).delete(synchronize_session=False)
+        db.query(VocabWord).filter(VocabWord.telegram_id == user_id).delete(synchronize_session=False)
+        db.query(IrregularVerbHistory).filter(IrregularVerbHistory.telegram_id == user_id).delete(synchronize_session=False)
+        db.delete(user)
+        db.commit()
+        return True
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def build_premium_stats_text(user_id: int) -> str:
     stats = get_premium_stats_snapshot(user_id)
     if not stats:
@@ -2229,10 +2249,12 @@ def build_learning_guide_text(user_id: int) -> str:
         f"Уже исправлено ошибок: {mastered_count}.\n"
         f"Ошибка дня приходит после {delivery['mistake_hour']:02d}:00 по вашему местному времени ({zone_label}).\n\n"
         "3. Разбор темы\n"
-        "Для разового вопроса: когда нужно понять конкретное правило или пример.\n\n"
-        "4. Шпаргалка и слова\n"
-        f"Помогают быстро вспомнить тему и расширить словарь. Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предлагает проверку на {VOCAB_REVIEW_WORDS_COUNT} слов.\n\n"
-        "5. Irregular verbs\n"
+        "Для разового вопроса: когда тема непонятна и нужно объяснение. Бот разбирает правило, показывает примеры, типичные ошибки и помогает понять логику.\n\n"
+        "4. Шпаргалка\n"
+        "Короткая памятка по теме без длинного урока. Удобно открыть, когда правило уже знакомо, но нужно быстро вспомнить форму, маркеры, примеры и частые ошибки.\n\n"
+        "5. Слова на день\n"
+        f"Ежедневный словарь: бот присылает {VOCAB_WORDS_PER_DAY} новых слов с переводом и примером. Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней предлагает проверку на {VOCAB_REVIEW_WORDS_COUNT} слов, где перевод нужно ввести вручную.\n\n"
+        "6. Irregular verbs\n"
         "Premium-рассылка: каждый день 5 неправильных глаголов с формами и примером."
     )
 
@@ -2241,9 +2263,9 @@ def build_learning_menu_text() -> str:
     return (
         "📘 Обучение\n"
         "Здесь только объяснение и справочные материалы.\n\n"
-        "• Разбор темы — понять правило и примеры\n"
-        "• Шпаргалка — быстро освежить тему\n"
-        f"• Слова на день — {VOCAB_WORDS_PER_DAY} новых слов для всех"
+        "• Разбор темы — подробное объяснение правила, примеры и частые ошибки\n"
+        "• Шпаргалка — короткая памятка, когда тему нужно быстро вспомнить\n"
+        f"• Слова на день — {VOCAB_WORDS_PER_DAY} новых слов, примеры и регулярная проверка"
     )
 
 
@@ -2293,6 +2315,14 @@ def build_settings_menu_text(user_id: int) -> str:
         f"{build_daily_goal_text(user_id)}\n\n"
         f"{get_free_plan_text() if not is_premium(user_id) else get_premium_plan_text()}\n\n"
         "Здесь можно поменять уровень и открыть справку."
+    )
+
+
+def build_delete_account_text() -> str:
+    return (
+        "🗑 Удаление аккаунта\n\n"
+        "Это удалит ваш профиль, прогресс пути изучения, сохранённые ошибки, словарь, историю irregular verbs, настройки рассылок и данные Premium в боте.\n\n"
+        "Действие нельзя отменить. После удаления можно начать заново через /start."
     )
 
 
@@ -2433,6 +2463,17 @@ def settings_menu(user_id: int):
         [InlineKeyboardButton(text="⏰ Рассылка", callback_data="delivery_settings")],
         [InlineKeyboardButton(text="✅ Исправленные ошибки", callback_data="mastered_mistakes")],
         [InlineKeyboardButton(text="💎 Premium", callback_data="premium")],
+        [InlineKeyboardButton(text="🗑 Удалить аккаунт", callback_data="delete_account_confirm")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+
+
+def delete_account_confirm_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data="delete_account"),
+            InlineKeyboardButton(text="✖️ Нет", callback_data="menu_settings"),
+        ],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -2845,7 +2886,7 @@ async def main():
             "2. Если бот просит тему, напишите её обычным текстом.\n"
             "3. Если бот дал задание, выберите вариант кнопкой или отправьте ответ текстом.\n\n"
             f"{build_learning_guide_text(guide_user_id)}\n\n"
-            "Команды: /start, /help, /cancel, /premium"
+            "Команды: /start, /help, /cancel, /premium, /delete_account"
         )
         if replace:
             await replace_or_answer(message, text, reply_markup=main_menu(guide_user_id))
@@ -4689,6 +4730,11 @@ Mistakes:
     async def premium_cmd(message: Message):
         await show_premium(message, message.from_user.id)
 
+    @dp.message(Command("delete_account"))
+    async def delete_account_cmd(message: Message, state: FSMContext):
+        await state.clear()
+        await message.answer(build_delete_account_text(), reply_markup=delete_account_confirm_kb())
+
     @dp.message(Command("grant_premium"))
     async def grant_premium_cmd(message: Message):
         if not is_admin(message.from_user.id):
@@ -5108,6 +5154,25 @@ Mistakes:
 
         elif data == "menu_settings":
             await replace_or_answer(call.message, build_settings_menu_text(call.from_user.id), reply_markup=settings_menu(call.from_user.id))
+
+        elif data == "delete_account_confirm":
+            await state.clear()
+            await replace_or_answer(call.message, build_delete_account_text(), reply_markup=delete_account_confirm_kb())
+
+        elif data == "delete_account":
+            await state.clear()
+            deleted = delete_user_account(call.from_user.id)
+            if deleted:
+                await replace_or_answer(
+                    call.message,
+                    "✅ Аккаунт удалён.\n\n"
+                    "Профиль, прогресс, ошибки, словарь и настройки очищены. Чтобы начать заново, нажмите /start.",
+                )
+            else:
+                await replace_or_answer(
+                    call.message,
+                    "Аккаунт уже не найден. Чтобы начать заново, нажмите /start.",
+                )
 
         elif data == "back_main":
             await state.clear()
