@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 from ai_client import AI_MODE_FREE, AI_MODE_PREMIUM, ask_ai
 from database.db import SessionLocal, engine, ensure_user_progress_columns
-from database.models import Base, IrregularVerbHistory, RoadmapLessonCache, User, UserMistake, VocabWord
+from database.models import Base, IrregularVerbHistory, User, UserMistake, VocabWord
 from glossary import glossary_menu, glossary_text
 from level_tests import get_level_test
 from modes import MODES
@@ -59,7 +59,7 @@ WEB_SERVER_HOST = (os.getenv("WEB_SERVER_HOST") or "0.0.0.0").strip()
 WEB_SERVER_PORT = int((os.getenv("PORT") or os.getenv("WEB_SERVER_PORT") or "8080").strip())
 
 DEFAULT_LEVEL = "A1"
-DEFAULT_WORDS_PER_DAY = 5
+VOCAB_WORDS_PER_DAY = 5
 DAILY_VOCAB_HOUR = 10
 DAILY_MISTAKE_HOUR = 18
 DAILY_IRREGULAR_VERBS_HOUR = 19
@@ -89,11 +89,10 @@ VOCAB_REVIEW_INTERVAL_DAYS = 7
 RECENT_IRREGULAR_VERBS_HISTORY_LIMIT = 60
 IRREGULAR_VERBS_PER_DAY = 5
 FREE_DAILY_AI_LIMIT = 5
-FREE_MAX_WORDS_PER_DAY = 3
-PREMIUM_MAX_WORDS_PER_DAY = 10
 DEFAULT_PREMIUM_DAYS = 30
 ROADMAP_REVIEW_INTERVAL = 3
-ROADMAP_CACHE_VERSION = "v3"
+ROADMAP_FINAL_TEST_QUESTIONS = 10
+ROADMAP_FINAL_TEST_PASS_SCORE = 8
 ROADMAP_GENERATION_MAX_ATTEMPTS = 5
 ROADMAP_MIN_THEORY_PAGES = 2
 ROADMAP_MAX_THEORY_PAGES = 3
@@ -443,9 +442,9 @@ def get_free_plan_text() -> str:
     return (
         "Free:\n"
         f"• {FREE_DAILY_AI_LIMIT} AI-запросов в день\n"
-        "• Путь изучения, разбор темы, тренировка и шпаргалки\n"
-        "• Путь изучения: готовые модули без расхода AI-запросов, новые темы тратят запрос\n"
-        f"• Vocabulary до {FREE_MAX_WORDS_PER_DAY} слов в день\n"
+        "• Путь изучения и AI-разборы в рамках лимита\n"
+        "• Готовые микро-тренировки без расхода AI-запросов\n"
+        f"• Vocabulary: {VOCAB_WORDS_PER_DAY} слов в день\n"
         "• Глоссарий, профиль, уровень и помощь без лимита\n"
         "• Irregular verbs недоступны\n"
         "• Chat и Voice недоступны"
@@ -460,7 +459,6 @@ def get_premium_plan_text() -> str:
         "• Чат-тренировка с AI-собеседником\n"
         "• Ежедневные неправильные глаголы\n"
         "• Статистика и отчёт недели\n"
-        f"• Vocabulary до {PREMIUM_MAX_WORDS_PER_DAY} слов в день\n"
     )
 
 
@@ -681,7 +679,7 @@ def get_level(user_id: int) -> str:
 
 def get_words_per_day(user_id: int) -> int | None:
     user = get_user(user_id)
-    return user.words_per_day if user else None
+    return VOCAB_WORDS_PER_DAY if user else None
 
 
 def get_daily_goal_snapshot(user_id: int) -> dict:
@@ -993,6 +991,48 @@ def format_topic_title(topic: str) -> str:
     return topic.replace(" and ", " & ").capitalize()
 
 
+def roadmap_topic_goal(topic: str) -> str:
+    topic_text = (topic or "").replace("review: ", "").strip()
+    title = format_topic_title(topic_text)
+    lower_topic = topic_text.lower()
+    goals = {
+        "to be": "говорить, кто вы, где вы и какой человек или предмет",
+        "personal pronouns": "заменять имена словами I, you, he, she, it, we, they",
+        "possessive adjectives": "говорить my, your, his, her и показывать принадлежность",
+        "articles": "выбирать a, an и the без угадывания",
+        "present simple": "говорить о привычках, фактах и регулярных действиях",
+        "past simple": "рассказывать, что произошло вчера, недавно или в прошлом",
+        "present continuous": "говорить о том, что происходит прямо сейчас",
+        "comparatives": "сравнивать два предмета или человека",
+        "superlatives": "говорить, что что-то самое лучшее, большое или важное",
+        "going to": "говорить о планах на будущее",
+        "will for predictions": "делать простые предположения о будущем",
+        "present perfect": "говорить об опыте и результате без точного времени",
+    }
+    for key, goal in goals.items():
+        if key in lower_topic:
+            return goal
+    return f"понять тему {title} и использовать её в простых фразах"
+
+
+def roadmap_review_countdown(snapshot: dict) -> str:
+    if snapshot["review_due"]:
+        return "повторение сейчас"
+    done = snapshot["done"]
+    review_index = snapshot.get("review_index", 0)
+    remaining = max(ROADMAP_REVIEW_INTERVAL - max(done - review_index, 0), 1)
+    return f"через {remaining} тем(ы)"
+
+
+def next_level_code(level: str) -> str | None:
+    codes = [code for code, _ in LEVELS]
+    level = normalize_level(level)
+    if level not in codes:
+        return None
+    index = codes.index(level)
+    return codes[index + 1] if index + 1 < len(codes) else None
+
+
 def progress_bar(done: int, total: int, width: int = 10) -> str:
     if total <= 0:
         return "□" * width
@@ -1292,71 +1332,6 @@ def build_roadmap_wrong_answer_text(question: dict, selected_index: int) -> str:
         f"{explanation_text}\n\n"
         "Что делаем дальше?"
     )
-
-
-def build_roadmap_cache_key(level: str, lesson_type: str, topic: str, simplify: bool) -> str:
-    normalized_topic = re.sub(r"\s+", " ", (topic or "").strip().lower())
-    return f"{ROADMAP_CACHE_VERSION}:{normalize_level(level)}:{lesson_type}:{int(simplify)}:{normalized_topic}"
-
-
-def get_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool) -> str | None:
-    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
-    db = SessionLocal()
-    try:
-        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
-        if not cached:
-            return None
-
-        cached.use_count = (cached.use_count or 0) + 1
-        cached.last_used_at = now_key()
-        content = cached.content
-        db.commit()
-        return content
-    finally:
-        db.close()
-
-
-def save_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool, content: str) -> None:
-    if not content:
-        return
-
-    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
-    db = SessionLocal()
-    try:
-        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
-        if cached:
-            cached.content = content
-            cached.last_used_at = now_key()
-            db.commit()
-            return
-
-        now = now_key()
-        db.add(RoadmapLessonCache(
-            cache_key=cache_key,
-            level=normalize_level(level),
-            topic=topic,
-            lesson_type=lesson_type,
-            simplify=1 if simplify else 0,
-            content=content,
-            created_at=now,
-            last_used_at=now,
-            use_count=0,
-        ))
-        db.commit()
-    finally:
-        db.close()
-
-
-def delete_cached_roadmap_lesson(level: str, lesson_type: str, topic: str, simplify: bool) -> None:
-    cache_key = build_roadmap_cache_key(level, lesson_type, topic, simplify)
-    db = SessionLocal()
-    try:
-        cached = db.query(RoadmapLessonCache).filter(RoadmapLessonCache.cache_key == cache_key).first()
-        if cached:
-            db.delete(cached)
-            db.commit()
-    finally:
-        db.close()
 
 
 def encode_options(options: list[str] | None) -> str:
@@ -2014,6 +1989,7 @@ def get_roadmap_snapshot(user: User) -> dict:
     total = len(topics)
     raw_index = user.current_topic_index or 0
     current_index = max(raw_index, 0)
+    review_index = max(user.roadmap_review_index or 0, 0)
     done = min(current_index, total)
     current_topic = topics[current_index] if current_index < total else None
     next_topics = topics[current_index + 1:current_index + 6] if current_topic else []
@@ -2028,6 +2004,7 @@ def get_roadmap_snapshot(user: User) -> dict:
         "total": total,
         "done": done,
         "current_index": current_index,
+        "review_index": review_index,
         "current_topic": current_topic,
         "next_topics": next_topics,
         "percent": percent,
@@ -2046,13 +2023,20 @@ def build_roadmap_text(user_id: int) -> str:
     done = snapshot["done"]
 
     if not snapshot["current_topic"]:
+        next_level = next_level_code(snapshot["level"])
+        next_text = (
+            f"После финального теста можно перейти на {level_label(next_level)}."
+            if next_level
+            else "Это последний уровень. Финальный тест закрепит весь путь."
+        )
         return (
             "🗺 Путь изучения\n\n"
-            "Это основной путь бота: идёте по темам уровня, а ошибки потом попадают в тренировку.\n\n"
-            f"Уровень: {snapshot['label']}\n"
-            f"Прогресс: {done}/{total} тем • 100%\n"
+            f"Карта прогресса: {snapshot['label']}\n"
+            f"Пройдено: {done}/{total} тем • 100%\n"
             f"{progress_bar(done, total)}\n\n"
-            "✅ Путь уровня завершён. Можно сменить уровень в профиле и продолжить."
+            "✅ Все темы уровня пройдены.\n"
+            "Следующий шаг: финальный тест уровня.\n"
+            f"{next_text}"
         )
 
     if snapshot["review_due"]:
@@ -2062,18 +2046,13 @@ def build_roadmap_text(user_id: int) -> str:
         )
         return (
             "🗺 Путь изучения\n\n"
-            "Это основной путь бота: учим темы по порядку и возвращаем ошибки в тренировку.\n\n"
-            f"Уровень: {snapshot['label']}\n"
-            f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
+            f"Карта прогресса: {snapshot['label']}\n"
+            f"Пройдено: {done}/{total} тем • {snapshot['percent']}%\n"
             f"{progress_bar(done, total)}\n\n"
             "Сейчас: повторение\n"
             f"{review_lines}\n\n"
-            "Почему это важно:\n"
-            "После нескольких новых тем бот возвращает старые темы, чтобы они закрепились, а не просто пролетели мимо.\n\n"
-            "Формат урока:\n"
-            "1. Теория 1 — смысл\n"
-            "2. Теория 2 — частые ошибки\n"
-            "3. Тест — 1-2 вопроса с вариантами ответа"
+            "Зачем это нужно: закрепить темы до того, как идти дальше.\n"
+            "После повторения вернёмся к следующей новой теме."
         )
 
     next_lines = "\n".join(
@@ -2085,19 +2064,17 @@ def build_roadmap_text(user_id: int) -> str:
 
     return (
         "🗺 Путь изучения\n\n"
-        "Это основной путь бота: проходите темы по уровню, а тренировка потом повторяет ваши ошибки.\n\n"
-        f"Уровень: {snapshot['label']}\n"
-        f"Прогресс: {done}/{total} тем • {snapshot['percent']}%\n"
+        f"Карта прогресса: {snapshot['label']}\n"
+        f"Пройдено: {done}/{total} тем • {snapshot['percent']}%\n"
         f"{progress_bar(done, total)}\n\n"
         "Текущий шаг:\n"
         f"{snapshot['current_index'] + 1}. {format_topic_title(snapshot['current_topic'])}\n\n"
+        "Сегодня научимся:\n"
+        f"{roadmap_topic_goal(snapshot['current_topic'])}.\n\n"
         "Следующие темы:\n"
         f"{next_lines}\n\n"
-        "Как это работает:\n"
-        "1. Теория 1 — смысл темы.\n"
-        "2. Теория 2 — как использовать и где ошибаются.\n"
-        "3. Тест — 1-2 вопроса с вариантами ответа.\n"
-        f"4. Каждые {ROADMAP_REVIEW_INTERVAL} темы — повторение."
+        f"Повторение: {roadmap_review_countdown(snapshot)}.\n"
+        "Формат: теория по шагам → короткий тест → ошибки попадают в тренировку."
     )
 
 
@@ -2130,6 +2107,39 @@ def build_roadmap_topics_text(user_id: int) -> str:
         f"{progress_bar(done, snapshot['total'])}\n\n"
         + "\n".join(lines)
     )
+
+
+def build_roadmap_start_text(user_id: int) -> tuple[str, bool]:
+    user = get_user(user_id)
+    if not user:
+        return "Пользователь не найден. Нажмите /start.", False
+
+    snapshot = get_roadmap_snapshot(user)
+    if not snapshot["current_topic"]:
+        return (
+            "🏁 Финальный тест уровня\n\n"
+            f"Уровень: {snapshot['label']}\n"
+            f"Пройдено: {snapshot['done']}/{snapshot['total']} тем\n\n"
+            f"В тесте будет {ROADMAP_FINAL_TEST_QUESTIONS} вопросов по уровню.\n"
+            f"Чтобы перейти дальше, нужно набрать {ROADMAP_FINAL_TEST_PASS_SCORE}/{ROADMAP_FINAL_TEST_QUESTIONS}."
+        ), True
+
+    if snapshot["review_due"]:
+        topics = ", ".join(format_topic_title(topic) for topic in snapshot["review_topics"])
+        return (
+            "🔁 Перед новой темой — повторение\n\n"
+            f"Повторяем: {topics}\n\n"
+            "Цель: быстро освежить темы и закрыть слабые места.\n"
+            "Выберите темп урока:"
+        ), False
+
+    topic = snapshot["current_topic"]
+    return (
+        f"🎯 Урок: {format_topic_title(topic)}\n\n"
+        f"Сегодня научимся: {roadmap_topic_goal(topic)}.\n"
+        "После урока будет короткий тест с вариантами ответа.\n\n"
+        "Выберите темп:"
+    ), False
 
 
 def menu_back_label() -> str:
@@ -2233,7 +2243,7 @@ def build_learning_menu_text() -> str:
         "Здесь только объяснение и справочные материалы.\n\n"
         "• Разбор темы — понять правило и примеры\n"
         "• Шпаргалка — быстро освежить тему\n"
-        f"• Слова на день — до {FREE_MAX_WORDS_PER_DAY} слов в Free"
+        f"• Слова на день — {VOCAB_WORDS_PER_DAY} новых слов для всех"
     )
 
 
@@ -2522,12 +2532,29 @@ def weekly_report_kb():
 
 def roadmap_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="▶️ Начать урок", callback_data="roadmap_start")],
+        [InlineKeyboardButton(text="▶️ Продолжить путь", callback_data="roadmap_start")],
         [InlineKeyboardButton(text="🧭 Список тем", callback_data="roadmap_topics")],
         [InlineKeyboardButton(text="ℹ️ Как учиться", callback_data="learning_guide")],
         [InlineKeyboardButton(text="🔄 Сбросить прогресс", callback_data="roadmap_reset_confirm")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
+
+
+def roadmap_start_mode_kb(is_final: bool = False, premium: bool = False):
+    if is_final:
+        rows = [[InlineKeyboardButton(text="🧪 Начать финальный тест", callback_data="roadmap_final_start")]]
+    else:
+        rows = [
+            [InlineKeyboardButton(text="⚡ Я уже немного знаю", callback_data="roadmap_start_mode:fast")],
+            [InlineKeyboardButton(text="📚 Объясни с нуля", callback_data="roadmap_start_mode:from_zero")],
+        ]
+        if premium:
+            rows.extend([
+                [InlineKeyboardButton(text="💼 Больше примеров для работы", callback_data="roadmap_start_mode:work")],
+                [InlineKeyboardButton(text="🧳 Больше примеров для путешествий", callback_data="roadmap_start_mode:travel")],
+            ])
+    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="mode_roadmap")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def roadmap_reset_confirm_kb():
@@ -2553,6 +2580,17 @@ def roadmap_wrong_answer_kb():
         [InlineKeyboardButton(text="📚 Перейти к теории", callback_data="roadmap_theory:0")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
+
+
+def roadmap_after_lesson_kb(has_mistakes: bool):
+    rows = []
+    if has_mistakes:
+        rows.append([InlineKeyboardButton(text="✍️ Закрыть старые ошибки", callback_data="mode_practice")])
+    rows.extend([
+        [InlineKeyboardButton(text="▶️ Продолжить путь", callback_data="mode_roadmap")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def yookassa_payment_kb(confirmation_url: str):
@@ -2625,25 +2663,12 @@ def level_question_kb(question: dict):
     ])
 
 
-def vocab_count_kb(user_id: int, current_value: int | None = None):
-    rows = []
-    row = []
-    max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
-
-    for value in range(3, 11):
-        prefix = "✅ " if current_value == value else ""
-        suffix = "" if value <= max_words else " 🔒"
-        row.append(InlineKeyboardButton(text=f"{prefix}{value}{suffix}", callback_data=f"set_vocab_count:{value}"))
-        if len(row) == 4:
-            rows.append(row)
-            row = []
-
-    if row:
-        rows.append(row)
-
-    rows.append([InlineKeyboardButton(text="🧪 Проверить слова", callback_data="vocab_review_start")])
-    rows.append([InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+def vocab_settings_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✨ Получить 5 слов сейчас", callback_data="vocab_send_now")],
+        [InlineKeyboardButton(text="🧪 Проверить слова", callback_data="vocab_review_start")],
+        [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
+    ])
 
 
 class Registration(StatesGroup):
@@ -3003,7 +3028,12 @@ async def main():
         index = data["level_index"]
         question = questions[index]
         test_kind = data.get("test_kind")
-        title = "Диагностика" if test_kind == "placement" else "Вопрос"
+        if test_kind == "placement":
+            title = "Диагностика"
+        elif test_kind == "roadmap_final":
+            title = "Финальный тест"
+        else:
+            title = "Вопрос"
         await message.answer(
             f"🧪 {title} {index + 1}/{len(questions)}\n\n{question['question']}",
             reply_markup=level_question_kb(question),
@@ -3162,9 +3192,6 @@ async def main():
         )
 
     def is_vocab_review_due(user: User) -> bool:
-        if not user.words_per_day:
-            return False
-
         today = user_local_datetime(user).date()
         if not user.last_vocab_review_sent_date:
             return True
@@ -3201,20 +3228,16 @@ async def main():
         return "\n\n".join(blocks)
 
     async def show_vocab_settings(message: Message, user_id: int, replace: bool = False):
-        current_value = get_words_per_day(user_id) or DEFAULT_WORDS_PER_DAY
-        max_words = PREMIUM_MAX_WORDS_PER_DAY if is_premium(user_id) else FREE_MAX_WORDS_PER_DAY
         text = (
             "✨ Настройка словаря\n"
-            "Выберите, сколько новых слов присылать каждый день.\n"
+            f"Каждый день бот присылает {VOCAB_WORDS_PER_DAY} новых слов. Это единый темп для Free и Premium.\n"
             f"Раз в {VOCAB_REVIEW_INTERVAL_DAYS} дней бот предложит проверку: {VOCAB_REVIEW_WORDS_COUNT} слов, перевод вводится вручную.\n"
-            f"Free: до {FREE_MAX_WORDS_PER_DAY} слов в день.\n"
-            f"Premium: до {PREMIUM_MAX_WORDS_PER_DAY} слов в день.\n"
-            f"Ваш максимум сейчас: {max_words}."
+            "Можно получить сегодняшнюю подборку сразу или запустить проверку."
         )
         if replace:
-            await replace_or_answer(message, text, reply_markup=vocab_count_kb(user_id, current_value))
+            await replace_or_answer(message, text, reply_markup=vocab_settings_kb())
         else:
-            await message.answer(text, reply_markup=vocab_count_kb(user_id, current_value))
+            await message.answer(text, reply_markup=vocab_settings_kb())
 
     async def start_vocab_review(message: Message, state: FSMContext, user_id: int):
         words = get_vocab_review_words(user_id)
@@ -3323,7 +3346,7 @@ async def main():
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.telegram_id == user_id).first()
-            if not user or not user.words_per_day:
+            if not user:
                 return False
 
             today = user_local_today(user)
@@ -3334,7 +3357,7 @@ async def main():
             user_is_premium = is_premium_user(user)
             level_code = user.level
             level = level_label(level_code)
-            count = user.words_per_day
+            count = VOCAB_WORDS_PER_DAY
             recent_words = [
                 item.word
                 for item in db.query(VocabWord)
@@ -3948,7 +3971,7 @@ async def main():
             reply_markup=mistake_reminder_after_kb(),
         )
 
-    async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int):
+    async def send_roadmap_lesson(message: Message, state: FSMContext, user_id: int, pace: str = "fast"):
         db = SessionLocal()
         try:
             user = db.query(User).filter(User.telegram_id == user_id).first()
@@ -3962,7 +3985,7 @@ async def main():
             topic = "review: " + ", ".join(review_topics) if review_due else get_current_topic(user)
             level_code = normalize_level(user.level)
             level = level_label(level_code)
-            simplify = user.last_result in {"wrong_twice", "review_wrong"}
+            simplify = user.last_result in {"wrong_twice", "review_wrong"} or pace == "from_zero"
         finally:
             db.close()
 
@@ -3978,10 +4001,8 @@ async def main():
             roadmap_kind = "topic"
             title = format_topic_title(topic)
 
-        cached_lesson = get_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify)
-        lesson = cached_lesson
-        validation = validate_roadmap_lesson(lesson, level_code) if lesson else None
-        generated_new_lesson = False
+        lesson = None
+        validation = None
         repair_notice_sent = False
 
         async def send_repair_notice() -> None:
@@ -4006,13 +4027,27 @@ async def main():
                     + "\n\nПроверь себя перед ответом: 2-3 страницы теории, QUIZ, понятные вопросы с контекстом, ANSWER только A/B/C/D."
                     + "\nВерни полностью новый модуль в том же строгом формате."
                 )
+            if pace == "fast":
+                prompt += (
+                    "\n\nТемп ученика: он уже немного знаком с темой.\n"
+                    "Объясняй без лишних отступлений, быстрее переходи к применению и типичным ошибкам, но сохрани 2-3 страницы теории и тест."
+                )
+            elif pace == "from_zero":
+                prompt += (
+                    "\n\nТемп ученика: объясни с нуля.\n"
+                    "Дай больше опоры, проще формулировки, больше базовых примеров и не используй сложные термины без объяснения."
+                )
+            elif pace == "work":
+                prompt += (
+                    "\n\nPremium-формат ученика: английский для работы.\n"
+                    "Сохрани учебную тему, но в теории и тестах чаще используй короткие рабочие ситуации: сообщения, встречи, задачи, дедлайны, просьбы и вежливые ответы."
+                )
+            elif pace == "travel":
+                prompt += (
+                    "\n\nPremium-формат ученика: английский для путешествий.\n"
+                    "Сохрани учебную тему, но в теории и тестах чаще используй ситуации поездки: аэропорт, отель, кафе, маршрут, покупки, просьбы и уточнения."
+                )
             return prompt
-
-        if validation and not validation["valid"]:
-            logging.warning("Cached roadmap lesson rejected: %s", "; ".join(validation["reasons"]))
-            if cached_lesson:
-                delete_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify)
-            lesson = None
 
         if not lesson:
             if not await ensure_ai_quota(message, user_id):
@@ -4028,7 +4063,6 @@ async def main():
                     level,
                     "roadmap_review" if review_due else "roadmap",
                 )
-                generated_new_lesson = True
                 validation = validate_roadmap_lesson(lesson, level_code)
                 if validation["valid"]:
                     break
@@ -4058,9 +4092,6 @@ async def main():
         theory_pages = validation["theory_pages"]
         quiz_questions = validation["quiz_questions"]
 
-        if generated_new_lesson:
-            save_cached_roadmap_lesson(level_code, roadmap_kind, topic, simplify, lesson)
-
         await state.update_data(
             roadmap_topic=topic,
             roadmap_lesson=lesson,
@@ -4073,7 +4104,12 @@ async def main():
             roadmap_theory_index=0,
         )
         await state.set_state(StudyFlow.viewing_roadmap_lesson)
-        await message.answer(f"🗺 Урок пути изучения: {title}")
+        goal_text = (
+            "Цель повторения: закрепить старые темы и найти слабые места."
+            if roadmap_kind == "review"
+            else f"Цель урока: {roadmap_topic_goal(topic)}."
+        )
+        await message.answer(f"🗺 Урок пути изучения: {title}\n\n{goal_text}")
         await send_roadmap_theory_page(message, state, user_id, 0)
 
     async def send_roadmap_theory_page(message: Message, state: FSMContext, user_id: int, index: int):
@@ -4178,7 +4214,14 @@ async def main():
 
         await state.clear()
         await message.answer(summary)
-        await message.answer(build_roadmap_text(user_id), reply_markup=roadmap_kb())
+        has_mistakes = bool(get_due_mistakes(user_id, limit=1))
+        followup = build_roadmap_text(user_id)
+        if topic_completed and has_mistakes:
+            followup = (
+                "✅ Тема закрыта. Самое время закрепить результат: у вас есть старые ошибки для повторения.\n\n"
+                + followup
+            )
+        await message.answer(followup, reply_markup=roadmap_after_lesson_kb(has_mistakes))
 
     async def handle_roadmap_quiz_answer(call: CallbackQuery, state: FSMContext):
         data = await state.get_data()
@@ -4278,6 +4321,106 @@ Mistakes:
 {details}
 """
         return ask_ai(prompt, level_label(target_level), "level_test")
+
+    async def start_roadmap_final_test(message: Message, state: FSMContext, user_id: int):
+        user = get_user(user_id)
+        if not user:
+            await state.clear()
+            await message.answer("User not found. Please use /start first.")
+            return
+
+        level = normalize_level(user.level)
+        await state.set_state(LevelChangeFlow.testing)
+        await state.update_data(
+            level_questions=get_level_test(level, ROADMAP_FINAL_TEST_QUESTIONS),
+            level_index=0,
+            level_answers=[],
+            test_kind="roadmap_final",
+            roadmap_final_level=level,
+        )
+        await message.answer(
+            f"🏁 Финальный тест уровня {level_label(level)}\n\n"
+            f"Вопросов: {ROADMAP_FINAL_TEST_QUESTIONS}\n"
+            f"Проходной балл: {ROADMAP_FINAL_TEST_PASS_SCORE}/{ROADMAP_FINAL_TEST_QUESTIONS}"
+        )
+        await send_level_question(message, state)
+
+    async def finish_roadmap_final_test(call: CallbackQuery, state: FSMContext):
+        data = await state.get_data()
+        level = normalize_level(data.get("roadmap_final_level") or get_level(call.from_user.id))
+        questions = data.get("level_questions") or []
+        answers = data.get("level_answers") or []
+        score = 0
+        wrong_answers = []
+
+        for question, selected_index in zip(questions, answers):
+            if selected_index == question["correct_index"]:
+                score += 1
+            else:
+                selected_answer = (
+                    question["options"][selected_index]
+                    if 0 <= selected_index < len(question["options"])
+                    else "нет ответа"
+                )
+                wrong_answers.append({
+                    "topic": question["topic"],
+                    "question": question["question"],
+                    "options": question["options"],
+                    "selected_answer": selected_answer,
+                    "correct_answer": question["answer"],
+                })
+
+        for item in wrong_answers:
+            save_user_mistake(
+                call.from_user.id,
+                level,
+                "roadmap_final",
+                item["topic"],
+                item["question"],
+                correct_answer=item["correct_answer"],
+                explanation=f"Ошибка в финальном тесте уровня. Правильный ответ: {item['correct_answer']}",
+                options=item["options"],
+            )
+
+        await state.clear()
+        if score >= ROADMAP_FINAL_TEST_PASS_SCORE:
+            next_level = next_level_code(level)
+            if not next_level:
+                await call.message.answer(
+                    f"🏆 Финальный тест пройден: {score}/{len(questions)}\n\n"
+                    "Вы закрыли последний уровень. Дальше лучше поддерживать навык через чат, ошибки и словарь.",
+                    reply_markup=main_menu(call.from_user.id),
+                )
+                return
+
+            db = SessionLocal()
+            try:
+                user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+                if user:
+                    user.level = next_level
+                    user.current_topic_index = 0
+                    user.roadmap_review_index = 0
+                    user.last_result = ""
+                    db.commit()
+            finally:
+                db.close()
+
+            await call.message.answer(
+                f"🏆 Финальный тест пройден: {score}/{len(questions)}\n\n"
+                f"Уровень повышен: {level_label(next_level)}.\n"
+                "Путь изучения начнётся с первой темы нового уровня.",
+                reply_markup=main_menu(call.from_user.id),
+            )
+            return
+
+        weak_topics = ", ".join(sorted({item["topic"] for item in wrong_answers})[:3])
+        await call.message.answer(
+            f"Финальный тест: {score}/{len(questions)}\n\n"
+            "Пока лучше закрепить уровень перед переходом.\n"
+            f"Повторить в первую очередь: {weak_topics or 'ошибки из теста'}.\n\n"
+            "Ошибки сохранены в тренировку.",
+            reply_markup=main_menu(call.from_user.id),
+        )
 
     async def finish_level_test(call: CallbackQuery, state: FSMContext):
         data = await state.get_data()
@@ -4484,7 +4627,7 @@ Mistakes:
                 weekly_vocab_review_checked=0,
                 weekly_vocab_review_correct=0,
                 last_weekly_report_sent_date="",
-                words_per_day=None,
+                words_per_day=VOCAB_WORDS_PER_DAY,
                 last_vocab_sent_date="",
                 last_vocab_review_sent_date="",
                 last_mistake_sent_date="",
@@ -4752,7 +4895,23 @@ Mistakes:
             await call.message.edit_text(build_delivery_settings_text(call.from_user.id), reply_markup=delivery_settings_kb())
 
         elif data == "roadmap_start":
-            await send_roadmap_lesson(call.message, state, call.from_user.id)
+            await state.clear()
+            text, is_final = build_roadmap_start_text(call.from_user.id)
+            await replace_or_answer(
+                call.message,
+                text,
+                reply_markup=roadmap_start_mode_kb(is_final, is_premium(call.from_user.id)),
+            )
+
+        elif data.startswith("roadmap_start_mode:"):
+            pace = data.split(":", 1)[1]
+            if pace in {"work", "travel"} and not is_premium(call.from_user.id):
+                await show_premium(call.message, call.from_user.id, replace=True)
+                return
+            await send_roadmap_lesson(call.message, state, call.from_user.id, pace=pace)
+
+        elif data == "roadmap_final_start":
+            await start_roadmap_final_test(call.message, state, call.from_user.id)
 
         elif data == "roadmap_topics":
             await show_roadmap_topics(call.message, call.from_user.id, replace=True)
@@ -4849,6 +5008,8 @@ Mistakes:
             if index >= len(questions):
                 if state_data.get("test_kind") == "placement":
                     await finish_placement_test(call, state)
+                elif state_data.get("test_kind") == "roadmap_final":
+                    await finish_roadmap_final_test(call, state)
                 else:
                     await finish_level_test(call, state)
             else:
@@ -4885,16 +5046,7 @@ Mistakes:
             await state.clear()
             await show_irregular_verbs_settings(call.message, call.from_user.id, replace=True)
 
-        elif data.startswith("set_vocab_count:"):
-            value = int(data.split(":", 1)[1])
-            if value < 3 or value > 10:
-                await call.answer("Выберите число от 3 до 10.")
-                return
-
-            if not is_premium(call.from_user.id) and value > FREE_MAX_WORDS_PER_DAY:
-                await show_premium(call.message, call.from_user.id, replace=True)
-                return
-
+        elif data == "vocab_send_now" or data.startswith("set_vocab_count:"):
             db = SessionLocal()
             try:
                 user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
@@ -4902,15 +5054,14 @@ Mistakes:
                     await call.message.answer("User not found. Please use /start first.")
                     return
 
-                user.words_per_day = value
+                user.words_per_day = VOCAB_WORDS_PER_DAY
                 user.last_vocab_sent_date = ""
                 db.commit()
             finally:
                 db.close()
 
             await call.message.answer(
-                f"✨ Словарь настроен: {value} слов в день.\n"
-                "Самый комфортный темп для большинства — 5-7 слов в день."
+                f"✨ Словарь настроен: {VOCAB_WORDS_PER_DAY} слов в день."
             )
             await send_vocab_words(bot, call.from_user.id, force=True)
 
