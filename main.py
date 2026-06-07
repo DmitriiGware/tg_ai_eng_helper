@@ -2592,6 +2592,7 @@ def advanced_menu(user_id: int):
             InlineKeyboardButton(text=lock("💬 Чат-тренировка", "chat"), callback_data="mode_chat"),
             InlineKeyboardButton(text=irregular_label, callback_data="irregular_verbs_settings"),
         ],
+        [InlineKeyboardButton(text=lock("🎤 Голос скоро", "voice"), callback_data="mode_voice")],
         [InlineKeyboardButton(text=menu_back_label(), callback_data="back_main")],
     ])
 
@@ -5328,6 +5329,15 @@ Mistakes:
 
             if MODES[mode]["premium"] and not is_premium(call.from_user.id):
                 await show_premium(call.message, call.from_user.id, replace=True)
+                return
+
+            if mode == "voice":
+                await replace_or_answer(
+                    call.message,
+                    "🎤 Голосовая тренировка скоро появится.\n\n"
+                    "Пока можно пользоваться текстовыми режимами: путь изучения, тренировка ошибок, разбор темы и чат-тренировка.",
+                    reply_markup=advanced_menu(call.from_user.id),
+                )
                 return
 
             if mode == "roadmap":
