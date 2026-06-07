@@ -8,9 +8,10 @@ import random
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
-from aiogram import Bot, Dispatcher
+from aiogram import BaseMiddleware, Bot, Dispatcher
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -44,6 +45,7 @@ from static_lessons import (
     find_static_lesson,
     lesson_to_practice_bundle,
 )
+from texts.legal import PRIVACY_POLICY_TEXT, USER_AGREEMENT_TEXT
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 load_dotenv(dotenv_path=ENV_PATH, override=True)
@@ -92,6 +94,14 @@ RECENT_IRREGULAR_VERBS_HISTORY_LIMIT = 60
 IRREGULAR_VERBS_PER_DAY = 5
 FREE_DAILY_AI_LIMIT = 5
 DEFAULT_PREMIUM_DAYS = 30
+LEGAL_CALLBACKS = {"show_terms", "show_privacy", "accept_terms"}
+LEGAL_GATE_TEXT = (
+    "Перед началом использования бота необходимо ознакомиться и согласиться с документами:\n\n"
+    "📄 Пользовательское соглашение\n"
+    "🔐 Политика конфиденциальности\n"
+    "✅ Согласие на обработку персональных данных\n\n"
+    "Продолжая, вы подтверждаете, что ознакомились с документами и принимаете их условия."
+)
 PREMIUM_PLANS = {
     "1m": {
         "label": "1 месяц",
@@ -326,6 +336,39 @@ def get_user(user_id: int) -> User | None:
     db = SessionLocal()
     try:
         return db.query(User).filter(User.telegram_id == user_id).first()
+    finally:
+        db.close()
+
+
+def has_accepted_terms(user_id: int) -> bool:
+    user = get_user(user_id)
+    return bool(user and user.terms_accepted)
+
+
+def is_registration_complete(user: User | None) -> bool:
+    return bool(user and user.name and user.birthday and user.frequency)
+
+
+def accept_user_terms(user_id: int) -> User:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            user = User(
+                telegram_id=user_id,
+                level=DEFAULT_LEVEL,
+                words_per_day=VOCAB_WORDS_PER_DAY,
+                timezone_offset=DEFAULT_TIMEZONE_OFFSET,
+                vocab_hour=DAILY_VOCAB_HOUR,
+                mistake_hour=DAILY_MISTAKE_HOUR,
+                irregular_verbs_hour=DAILY_IRREGULAR_VERBS_HOUR,
+            )
+            db.add(user)
+        user.terms_accepted = True
+        user.terms_accepted_at = datetime.utcnow()
+        db.commit()
+        db.refresh(user)
+        return user
     finally:
         db.close()
 
@@ -1045,6 +1088,17 @@ def build_support_text(user_id: int) -> str:
     )
 
 
+def build_legal_text(text: str) -> str:
+    contact = SUPPORT_CONTACT or "поддержку бота"
+    return text.replace(
+        "поддержку, указанную в интерфейсе бота",
+        f"поддержку, указанную в интерфейсе бота ({contact})",
+    ).replace(
+        "поддержки, указанной в интерфейсе бота",
+        f"поддержки, указанной в интерфейсе бота ({contact})",
+    )
+
+
 def build_admin_user_text(user_id: int) -> str:
     db = SessionLocal()
     try:
@@ -1081,7 +1135,9 @@ def build_admin_user_text(user_id: int) -> str:
             f"Irregular: {irregular_total}\n"
             f"Ошибок: {mistakes_total}, активных: {mistakes_active}, исправленных: {mistakes_mastered}\n"
             f"Последний YooKassa: {user.last_yookassa_payment_id or '—'}\n"
-            f"Последний Stars charge: {user.last_telegram_payment_charge_id or '—'}"
+            f"Последний Stars charge: {user.last_telegram_payment_charge_id or '—'}\n"
+            f"Документы приняты: {'да' if user.terms_accepted else 'нет'}\n"
+            f"Дата принятия: {user.terms_accepted_at or '—'}"
         )
     finally:
         db.close()
@@ -2592,6 +2648,73 @@ def build_premium_checkout_text(plan_key: str) -> str:
     )
 
 
+def legal_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📄 Пользовательское соглашение", callback_data="show_terms")],
+        [InlineKeyboardButton(text="🔐 Политика конфиденциальности", callback_data="show_privacy")],
+        [InlineKeyboardButton(text="✅ Согласен и начать", callback_data="accept_terms")],
+    ])
+
+
+async def safe_send_long_text(message: Message, text: str, reply_markup=None) -> None:
+    limit = 3900
+    chunks = []
+    current = ""
+    for part in text.strip().split("\n\n"):
+        candidate = f"{current}\n\n{part}".strip() if current else part
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        while len(part) > limit:
+            chunks.append(part[:limit])
+            part = part[limit:]
+        current = part
+    if current:
+        chunks.append(current)
+
+    for index, chunk in enumerate(chunks):
+        await message.answer(chunk, reply_markup=reply_markup if index == len(chunks) - 1 else None)
+
+
+async def show_legal_gate(message: Message) -> None:
+    await message.answer(LEGAL_GATE_TEXT, reply_markup=legal_keyboard())
+
+
+class LegalGateMiddleware(BaseMiddleware):
+    async def __call__(
+        self,
+        handler: Callable[[Any, dict[str, Any]], Awaitable[Any]],
+        event: Any,
+        data: dict[str, Any],
+    ) -> Any:
+        user = data.get("event_from_user")
+        if not user:
+            return await handler(event, data)
+
+        if isinstance(event, Message):
+            text = (event.text or "").strip()
+            if text.startswith("/start"):
+                return await handler(event, data)
+            if has_accepted_terms(user.id):
+                return await handler(event, data)
+            await show_legal_gate(event)
+            return None
+
+        if isinstance(event, CallbackQuery):
+            callback_data = event.data or ""
+            if callback_data in LEGAL_CALLBACKS:
+                return await handler(event, data)
+            if has_accepted_terms(user.id):
+                return await handler(event, data)
+            await event.answer()
+            await show_legal_gate(event.message)
+            return None
+
+        return await handler(event, data)
+
+
 def main_menu(user_id: int):
     rows = [
         [InlineKeyboardButton(text="🗺 Путь изучения", callback_data="mode_roadmap")],
@@ -3086,6 +3209,8 @@ async def main():
 
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+    dp.message.outer_middleware(LegalGateMiddleware())
+    dp.callback_query.outer_middleware(LegalGateMiddleware())
 
     async def show_main_menu(message: Message, state: FSMContext):
         await state.clear()
@@ -4208,7 +4333,6 @@ async def main():
     async def handle_daily_mistake_answer(call: CallbackQuery):
         parts = call.data.split(":")
         if len(parts) != 3:
-            await call.answer()
             return
 
         mistake_id = int(parts[1])
@@ -4841,6 +4965,7 @@ Mistakes:
 
     @dp.callback_query(Registration.frequency, lambda c: c.data and c.data.startswith("freq_"))
     async def reg_freq(call: CallbackQuery, state: FSMContext):
+        await call.answer()
         freq = call.data.replace("freq_", "")
         data = await state.get_data()
         name = data.get("name")
@@ -4853,59 +4978,30 @@ Mistakes:
 
         db = SessionLocal()
         try:
-            user = User(
-                telegram_id=call.from_user.id,
-                name=name,
-                birthday=birthdate,
-                frequency=freq,
-                level=DEFAULT_LEVEL,
-                current_topic_index=0,
-                roadmap_review_index=0,
-                last_result="",
-                streak_count=0,
-                streak_last_date="",
-                daily_goal_date="",
-                daily_goal_errors_closed=0,
-                daily_goal_topics_done=0,
-                roadmap_topics_completed_total=0,
-                practice_sessions_completed=0,
-                mistake_training_sessions_completed=0,
-                chat_sessions_completed=0,
-                ai_explanations_completed=0,
-                ai_summaries_completed=0,
-                ai_quizzes_completed=0,
-                vocab_review_checked_count=0,
-                vocab_review_correct_count=0,
-                weekly_stats_key="",
-                weekly_roadmap_topics_done=0,
-                weekly_practice_sessions=0,
-                weekly_mistake_training_sessions=0,
-                weekly_chat_sessions=0,
-                weekly_ai_explanations=0,
-                weekly_ai_summaries=0,
-                weekly_ai_quizzes=0,
-                weekly_vocab_review_checked=0,
-                weekly_vocab_review_correct=0,
-                last_weekly_report_sent_date="",
-                words_per_day=VOCAB_WORDS_PER_DAY,
-                last_vocab_sent_date="",
-                last_vocab_review_sent_date="",
-                last_mistake_sent_date="",
-                irregular_verbs_enabled=0,
-                last_irregular_verbs_sent_date="",
-                timezone_offset=DEFAULT_TIMEZONE_OFFSET,
-                vocab_hour=DAILY_VOCAB_HOUR,
-                mistake_hour=DAILY_MISTAKE_HOUR,
-                irregular_verbs_hour=DAILY_IRREGULAR_VERBS_HOUR,
-                premium_until="",
-                ai_requests_date="",
-                ai_requests_count=0,
-                pending_yookassa_payment_id="",
-                pending_yookassa_payment_url="",
-                last_yookassa_payment_id="",
-                last_telegram_payment_charge_id="",
-            )
-            db.add(user)
+            user = db.query(User).filter(User.telegram_id == call.from_user.id).first()
+            if not user:
+                user = User(
+                    telegram_id=call.from_user.id,
+                    level=DEFAULT_LEVEL,
+                    terms_accepted=True,
+                    terms_accepted_at=datetime.utcnow(),
+                )
+                db.add(user)
+
+            user.name = name
+            user.birthday = birthdate
+            user.frequency = freq
+            user.level = user.level or DEFAULT_LEVEL
+            user.current_topic_index = user.current_topic_index or 0
+            user.roadmap_review_index = user.roadmap_review_index or 0
+            user.last_result = user.last_result or ""
+            user.words_per_day = user.words_per_day or VOCAB_WORDS_PER_DAY
+            user.timezone_offset = user.timezone_offset or DEFAULT_TIMEZONE_OFFSET
+            user.vocab_hour = delivery_hour(user.vocab_hour, DAILY_VOCAB_HOUR)
+            user.mistake_hour = delivery_hour(user.mistake_hour, DAILY_MISTAKE_HOUR)
+            user.irregular_verbs_hour = delivery_hour(user.irregular_verbs_hour, DAILY_IRREGULAR_VERBS_HOUR)
+            user.terms_accepted = True
+            user.terms_accepted_at = user.terms_accepted_at or datetime.utcnow()
             db.commit()
         finally:
             db.close()
@@ -4928,11 +5024,15 @@ Mistakes:
 
     @dp.message(CommandStart())
     async def start(message: Message, state: FSMContext):
-        if get_user(message.from_user.id):
+        user = get_user(message.from_user.id)
+        if not user or not user.terms_accepted:
+            await state.clear()
+            await show_legal_gate(message)
+        elif is_registration_complete(user):
             await show_main_menu(message, state)
         else:
             await state.set_state(Registration.name)
-            await message.answer("Привет. Как тебя зовут?")
+            await message.answer("Отлично, продолжим регистрацию.\n\nКак тебя зовут?")
 
     @dp.message(Command("help"))
     async def help_cmd(message: Message):
@@ -5100,8 +5200,31 @@ Mistakes:
         if not data:
             await call.answer()
             return
+        await call.answer()
 
-        if data == "help":
+        if data == "show_terms":
+            await safe_send_long_text(call.message, build_legal_text(USER_AGREEMENT_TEXT), reply_markup=legal_keyboard())
+
+        elif data == "show_privacy":
+            await safe_send_long_text(call.message, build_legal_text(PRIVACY_POLICY_TEXT), reply_markup=legal_keyboard())
+
+        elif data == "accept_terms":
+            user = accept_user_terms(call.from_user.id)
+            if is_registration_complete(user):
+                await state.clear()
+                await replace_or_answer(
+                    call.message,
+                    "✅ Документы приняты.\n\n" + build_main_menu_text(call.from_user.id),
+                    reply_markup=main_menu(call.from_user.id),
+                )
+            else:
+                await state.set_state(Registration.name)
+                await replace_or_answer(
+                    call.message,
+                    "✅ Документы приняты.\n\nТеперь начнём регистрацию.\n\nКак тебя зовут?",
+                )
+
+        elif data == "help":
             await show_help(call.message, call.from_user.id, replace=True)
 
         elif data == "support":
@@ -5457,7 +5580,7 @@ Mistakes:
             await change_level_action(call.message, call.from_user.id, replace=True)
 
         elif data == "noop":
-            await call.answer()
+            pass
 
         elif data == "menu_learning":
             await replace_or_answer(call.message, build_learning_menu_text(), reply_markup=learning_menu(call.from_user.id))

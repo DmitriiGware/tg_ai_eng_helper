@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text
 from database.db import Base
 
 class User(Base):
@@ -55,6 +55,8 @@ class User(Base):
     pending_yookassa_payment_url = Column(String, default="")
     last_yookassa_payment_id = Column(String, default="")
     last_telegram_payment_charge_id = Column(String, default="")
+    terms_accepted = Column(Boolean, default=False)
+    terms_accepted_at = Column(DateTime, nullable=True)
 
 
 class VocabWord(Base):

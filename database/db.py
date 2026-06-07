@@ -265,3 +265,13 @@ def ensure_user_progress_columns():
             conn.exec_driver_sql(
                 "ALTER TABLE users ADD COLUMN last_telegram_payment_charge_id VARCHAR DEFAULT ''"
             )
+
+        if "terms_accepted" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN terms_accepted BOOLEAN DEFAULT 0"
+            )
+
+        if "terms_accepted_at" not in columns:
+            conn.exec_driver_sql(
+                "ALTER TABLE users ADD COLUMN terms_accepted_at DATETIME"
+            )
