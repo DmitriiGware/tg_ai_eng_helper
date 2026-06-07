@@ -604,6 +604,22 @@ def grant_premium(user_id: int, days: int = DEFAULT_PREMIUM_DAYS) -> str | None:
         db.close()
 
 
+def revoke_premium(user_id: int) -> bool:
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.telegram_id == user_id).first()
+        if not user:
+            return False
+
+        user.premium_until = ""
+        user.pending_yookassa_payment_id = ""
+        user.pending_yookassa_payment_url = ""
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
 def grant_premium_from_yookassa_payment(user_id: int, payment_id: str, days: int = DEFAULT_PREMIUM_DAYS) -> tuple[bool, str | None]:
     db = SessionLocal()
     try:
@@ -4745,6 +4761,33 @@ Mistakes:
             await bot.send_message(target_user_id, f"💎 Premium активирован до {premium_until}.")
         except Exception as exc:
             logging.exception("Failed to notify premium user %s: %s", target_user_id, exc)
+
+    @dp.message(Command("revoke_premium"))
+    async def revoke_premium_cmd(message: Message):
+        if not is_admin(message.from_user.id):
+            await message.answer("Эта команда доступна только администратору.")
+            return
+
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            await message.answer("Формат: /revoke_premium USER_ID\nПример: /revoke_premium 123456789")
+            return
+
+        try:
+            target_user_id = int(parts[1])
+        except ValueError:
+            await message.answer("USER_ID должен быть числом.")
+            return
+
+        if not revoke_premium(target_user_id):
+            await message.answer("Пользователь не найден. Он должен сначала открыть /start.")
+            return
+
+        await message.answer(f"✅ Premium снят у пользователя {target_user_id}.")
+        try:
+            await bot.send_message(target_user_id, "Premium-статус отключён.")
+        except Exception as exc:
+            logging.exception("Failed to notify revoked premium user %s: %s", target_user_id, exc)
 
     @dp.pre_checkout_query()
     async def pre_checkout_query(query: PreCheckoutQuery):
